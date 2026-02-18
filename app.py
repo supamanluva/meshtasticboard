@@ -70,7 +70,7 @@ mqtt_stats = {
 }
 mqtt_rate_window = []     # timestamps for rolling rate calculation
 MAX_MQTT_FEED = 500
-MQTT_DEFAULT_KEY = base64.b64decode("1PG7OiApAADU8bs6ICkAAA==")  # default Meshtastic AES key
+MQTT_DEFAULT_KEY = base64.b64decode("1PG7OiApB1nwvP+rz05pAQ==")[:16]  # default Meshtastic AES key
 
 
 def _get_decryption_keys():
@@ -361,13 +361,15 @@ def _mqtt_decrypt(mp, key=None):
     if key is None:
         key = MQTT_DEFAULT_KEY
     try:
-        nonce = struct.pack("<II", mp.id, getattr(mp, "from")) + b"\x00" * 8
+        nonce = struct.pack("<QII", mp.id, getattr(mp, "from"), 0)
         cipher = Cipher(algorithms.AES(key), modes.CTR(nonce))
         dec = cipher.decryptor()
         plaintext = dec.update(mp.encrypted) + dec.finalize()
         data = mesh_pb2.Data()
         data.ParseFromString(plaintext)
-        return data
+        if data.portnum and data.portnum > 0:
+            return data
+        return None
     except Exception:
         return None
 
@@ -962,6 +964,25 @@ def api_disconnect():
     dev["error"] = "manually disconnected"
     socketio.emit("device_disconnected", {"device": device_name})
     return jsonify({"status": "disconnected", "device": device_name})
+
+
+@app.route("/api/reboot", methods=["POST"])
+def api_reboot():
+    """Reboot a specific device."""
+    data = request.json
+    device_name = data.get("device")
+    secs = data.get("secs", 5)
+    dev = devices.get(device_name)
+    if not dev:
+        return jsonify({"error": "device not found"}), 404
+    if not dev.get("connected"):
+        return jsonify({"error": "device not connected"}), 400
+    iface = dev.get("interface")
+    try:
+        iface.localNode.reboot(secs)
+        return jsonify({"status": "rebooting", "device": device_name, "secs": secs})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # ── MQTT API Routes ──────────────────────────────────────────────────────────

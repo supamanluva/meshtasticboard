@@ -367,6 +367,12 @@ body {
     border: none;
 }
 .btn-reconnect:hover { opacity: .85; }
+.btn-reboot {
+    background: #e67e22;
+    color: #fff;
+    border: none;
+}
+.btn-reboot:hover { opacity: .85; }
 
 /* ── Nodes Table ────────────────────────────────────────────────────────── */
 

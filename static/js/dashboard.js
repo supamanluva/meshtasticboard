@@ -257,6 +257,7 @@ function renderDevices(devices) {
                 <div class="device-meta"><span>Error: <strong>${d.error || "unknown"}</strong></span></div>
                 <div class="device-actions">
                     <button class="btn btn-sm btn-reconnect" onclick="reconnectDevice('${d.name}')">&#x21bb; Reconnect</button>
+                    <button class="btn btn-sm btn-reboot" onclick="rebootDevice('${d.name}')">&#x26A1; Reboot</button>
                 </div>
             </div>`;
         }
@@ -278,6 +279,7 @@ function renderDevices(devices) {
             <div class="device-actions">
                 <button class="btn btn-sm btn-disconnect" onclick="disconnectDevice('${d.name}')">&#x2716; Disconnect</button>
                 <button class="btn btn-sm btn-reconnect" onclick="reconnectDevice('${d.name}')">&#x21bb; Reconnect</button>
+                <button class="btn btn-sm btn-reboot" onclick="rebootDevice('${d.name}')">&#x26A1; Reboot</button>
             </div>
         </div>`;
     }).join("");
@@ -323,6 +325,29 @@ async function reconnectDevice(name) {
         }
     } catch (e) {
         showToast(`Reconnect error: ${e.message}`, "error");
+    }
+}
+
+async function rebootDevice(name) {
+    if (!confirm(`Reboot ${name}? The device will restart in ~5 seconds.`)) return;
+    try {
+        const res = await fetch("/api/reboot", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ device: name, secs: 5 }),
+        });
+        const data = await res.json();
+        if (res.ok) {
+            showToast(`${name} rebooting in ${data.secs}s…`, "info");
+            // Refresh after reboot delay + reconnect time
+            setTimeout(() => {
+                reconnectDevice(name);
+            }, (data.secs + 10) * 1000);
+        } else {
+            showToast(`Reboot failed: ${data.error}`, "error");
+        }
+    } catch (e) {
+        showToast(`Reboot error: ${e.message}`, "error");
     }
 }
 
@@ -1869,6 +1894,7 @@ document.addEventListener("DOMContentLoaded", () => {
     // Expose device actions to global scope for onclick handlers
     window.disconnectDevice = disconnectDevice;
     window.reconnectDevice = reconnectDevice;
+    window.rebootDevice = rebootDevice;
     window.toggleMqttChannel = toggleMqttChannel;
     window.saveMqttDeviceConfig = saveMqttDeviceConfig;
 });
