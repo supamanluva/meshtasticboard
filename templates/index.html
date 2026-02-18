@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Meshtastic Dashboard</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+</head>
+<body>
+    <!-- Top bar -->
+    <header class="topbar">
+        <div class="topbar-left">
+            <svg class="logo-icon" viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="5" r="2"/>
+                <circle cx="5" cy="19" r="2"/>
+                <circle cx="19" cy="19" r="2"/>
+                <line x1="12" y1="7" x2="5" y2="17"/>
+                <line x1="12" y1="7" x2="19" y2="17"/>
+                <line x1="5" y1="19" x2="19" y2="19"/>
+            </svg>
+            <h1>Meshtastic Dashboard</h1>
+        </div>
+        <div class="topbar-right">
+            <span id="connection-status" class="badge badge-offline">Connecting…</span>
+            <button id="btn-theme" class="btn btn-sm btn-icon" title="Toggle theme">
+                <svg id="theme-icon-dark" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1111.21 3a7 7 0 009.79 9.79z"/></svg>
+                <svg id="theme-icon-light" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+            </button>
+            <button id="btn-notif" class="btn btn-sm btn-icon" title="Toggle notifications">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
+                <span id="notif-dot" class="notif-dot" style="display:none"></span>
+            </button>
+            <button id="btn-refresh" class="btn btn-sm" title="Refresh all data">&#x21bb; Refresh</button>
+        </div>
+    </header>
+
+    <!-- Tab Navigation -->
+    <nav class="tab-nav">
+        <button class="tab-btn active" data-tab="tab-dashboard">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg>
+            Dashboard
+        </button>
+        <button class="tab-btn" data-tab="tab-nodes">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/><line x1="12" y1="7" x2="5" y2="17"/><line x1="12" y1="7" x2="19" y2="17"/></svg>
+            Nodes <span id="node-count" class="badge badge-tab">0</span>
+        </button>
+        <button class="tab-btn" data-tab="tab-map">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/><circle cx="12" cy="9" r="2.5"/></svg>
+            Map
+        </button>
+        <button class="tab-btn" data-tab="tab-topology">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="18" r="3"/><line x1="9" y1="6" x2="15" y2="6"/><line x1="6" y1="9" x2="6" y2="15"/><line x1="18" y1="9" x2="18" y2="15"/><line x1="9" y1="18" x2="15" y2="18"/></svg>
+            Topology
+        </button>
+        <button class="tab-btn" data-tab="tab-traceroute">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22,12 18,12 15,21 9,3 6,12 2,12"/></svg>
+            Traceroute
+        </button>
+        <button class="tab-btn" data-tab="tab-stats">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+            Statistics
+        </button>
+        <button class="tab-btn" data-tab="tab-messages">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+            Messages <span id="msg-count" class="badge badge-tab">0</span>
+        </button>
+        <button class="tab-btn" data-tab="tab-config">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+            Config
+        </button>
+    </nav>
+
+    <!-- ══ TAB: Dashboard ══════════════════════════════════════════════ -->
+    <main id="tab-dashboard" class="tab-content active">
+        <div class="dashboard dashboard-home">
+            <section class="panel panel-devices">
+                <div class="panel-header"><h2>Devices</h2></div>
+                <div id="devices-container" class="panel-body">
+                    <p class="muted">Loading devices…</p>
+                </div>
+            </section>
+            <section class="panel panel-channels">
+                <div class="panel-header"><h2>Channels</h2></div>
+                <div id="channels-container" class="panel-body">
+                    <p class="muted">Loading…</p>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <!-- ══ TAB: Nodes ══════════════════════════════════════════════════ -->
+    <main id="tab-nodes" class="tab-content">
+        <div class="dashboard dashboard-single">
+            <section class="panel panel-full">
+                <div class="panel-header">
+                    <h2>Mesh Nodes</h2>
+                    <input id="node-search" type="text" class="input input-sm" placeholder="Search nodes…" autocomplete="off">
+                    <span id="node-count-header" class="badge">0</span>
+                </div>
+                <div class="panel-body">
+                    <div class="table-wrap">
+                        <table id="nodes-table">
+                            <thead>
+                                <tr>
+                                    <th>Name</th>
+                                    <th>Short</th>
+                                    <th>ID</th>
+                                    <th>HW</th>
+                                    <th>Role</th>
+                                    <th>Battery</th>
+                                    <th>SNR</th>
+                                    <th>Hops</th>
+                                    <th>Position</th>
+                                    <th>Last Heard</th>
+                                    <th>Seen By</th>
+                                </tr>
+                            </thead>
+                            <tbody id="nodes-body">
+                                <tr><td colspan="11" class="muted">Loading…</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <!-- ══ TAB: Map ════════════════════════════════════════════════════ -->
+    <main id="tab-map" class="tab-content">
+        <div class="map-container">
+            <div id="mesh-map"></div>
+            <div class="map-legend">
+                <h3>Nodes on Map</h3>
+                <div id="map-node-list" class="map-node-list">
+                    <p class="muted">No nodes with GPS position.</p>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- ══ TAB: Topology (Signal Graph) ════════════════════════════════ -->
+    <main id="tab-topology" class="tab-content">
+        <div class="dashboard dashboard-single">
+            <section class="panel panel-full">
+                <div class="panel-header">
+                    <h2>Signal Topology</h2>
+                    <div class="panel-actions">
+                        <button id="btn-topo-refresh" class="btn btn-sm">&#x21bb; Refresh</button>
+                        <label class="toggle-label">
+                            <input type="checkbox" id="topo-labels" checked> Labels
+                        </label>
+                    </div>
+                </div>
+                <div class="panel-body panel-body-graph">
+                    <div id="topology-graph"></div>
+                    <div class="topo-info-panel">
+                        <h4>Topology Info</h4>
+                        <div id="topo-info-content">
+                            <p class="muted">Click a node or edge for details.</p>
+                        </div>
+                        <div class="topo-legend">
+                            <div class="topo-legend-item"><span class="topo-dot topo-local"></span> Your devices</div>
+                            <div class="topo-legend-item"><span class="topo-dot topo-remote"></span> Remote nodes</div>
+                            <div class="topo-legend-item"><span class="topo-line topo-strong"></span> Strong signal (>0 dB)</div>
+                            <div class="topo-legend-item"><span class="topo-line topo-medium"></span> Medium signal</div>
+                            <div class="topo-legend-item"><span class="topo-line topo-weak"></span> Weak signal (<-10 dB)</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <!-- ══ TAB: Traceroute ═════════════════════════════════════════════ -->
+    <main id="tab-traceroute" class="tab-content">
+        <div class="dashboard dashboard-single">
+            <section class="panel panel-full">
+                <div class="panel-header">
+                    <h2>Traceroute</h2>
+                </div>
+                <div class="panel-body">
+                    <form id="traceroute-form" class="send-form">
+                        <div class="send-row">
+                            <select id="tr-device" class="input" title="Send from device">
+                                <option value="">Select device…</option>
+                            </select>
+                            <select id="tr-destination" class="input" title="Destination node">
+                                <option value="">Select destination…</option>
+                            </select>
+                            <button type="submit" class="btn btn-primary">Run Traceroute</button>
+                        </div>
+                    </form>
+                    <div id="traceroute-results" class="traceroute-results">
+                        <p class="muted">Run a traceroute to see the path to a node.</p>
+                    </div>
+                    <div class="map-container map-container-small">
+                        <div id="traceroute-map"></div>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <!-- ══ TAB: Statistics ═════════════════════════════════════════════ -->
+    <main id="tab-stats" class="tab-content">
+        <div class="dashboard dashboard-stats">
+            <section class="panel panel-full">
+                <div class="panel-header">
+                    <h2>Node Statistics</h2>
+                    <select id="stats-node-select" class="input" title="Select node">
+                        <option value="">All nodes overview</option>
+                    </select>
+                </div>
+                <div class="panel-body">
+                    <!-- Overview cards -->
+                    <div id="stats-overview" class="stats-overview">
+                        <div class="stat-card">
+                            <div class="stat-value" id="stat-total-nodes">0</div>
+                            <div class="stat-label">Total Nodes</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="stat-online-nodes">0</div>
+                            <div class="stat-label">Online (15min)</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="stat-with-gps">0</div>
+                            <div class="stat-label">With GPS</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="stat-avg-snr">—</div>
+                            <div class="stat-label">Avg SNR</div>
+                        </div>
+                    </div>
+                    <!-- Charts -->
+                    <div class="charts-grid">
+                        <div class="chart-container">
+                            <h3>Battery Levels</h3>
+                            <canvas id="chart-battery"></canvas>
+                        </div>
+                        <div class="chart-container">
+                            <h3>SNR Distribution</h3>
+                            <canvas id="chart-snr"></canvas>
+                        </div>
+                        <div class="chart-container">
+                            <h3>Channel Utilization</h3>
+                            <canvas id="chart-channel-util"></canvas>
+                        </div>
+                        <div class="chart-container">
+                            <h3>Hardware Models</h3>
+                            <canvas id="chart-hw-models"></canvas>
+                        </div>
+                    </div>
+                    <!-- Single node history charts (hidden until selected) -->
+                    <div id="stats-node-detail" class="charts-grid" style="display:none">
+                        <div class="chart-container chart-wide">
+                            <h3>Battery Over Time</h3>
+                            <canvas id="chart-node-battery"></canvas>
+                        </div>
+                        <div class="chart-container chart-wide">
+                            <h3>Channel Utilization Over Time</h3>
+                            <canvas id="chart-node-chutil"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <!-- ══ TAB: Messages ═══════════════════════════════════════════════ -->
+    <main id="tab-messages" class="tab-content">
+        <div class="dashboard dashboard-single">
+            <section class="panel panel-full">
+                <div class="panel-header">
+                    <h2>Messages</h2>
+                    <span id="msg-count-header" class="badge">0</span>
+                </div>
+                <div class="panel-body">
+                    <div id="messages-list" class="messages-list">
+                        <p class="muted">No messages yet.</p>
+                    </div>
+                    <form id="send-form" class="send-form">
+                        <div class="send-row">
+                            <select id="send-device" class="input" title="Select device to send from">
+                                <option value="">Select device…</option>
+                            </select>
+                            <select id="send-destination" class="input" title="Destination">
+                                <option value="^all">All (broadcast)</option>
+                            </select>
+                            <select id="send-channel" class="input" title="Channel">
+                                <option value="0">Ch 0</option>
+                            </select>
+                        </div>
+                        <div class="send-row">
+                            <input id="send-text" type="text" class="input flex-1" placeholder="Type a message…" autocomplete="off" maxlength="228">
+                            <button type="submit" class="btn btn-primary">Send</button>
+                        </div>
+                    </form>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <!-- ══ TAB: Remote Config ══════════════════════════════════════════ -->
+    <main id="tab-config" class="tab-content">
+        <div class="dashboard dashboard-single">
+            <section class="panel panel-full">
+                <div class="panel-header">
+                    <h2>Device Configuration</h2>
+                    <select id="config-device-select" class="input" title="Select device">
+                        <option value="">Select device…</option>
+                    </select>
+                    <button id="btn-load-config" class="btn btn-sm">Load Config</button>
+                </div>
+                <div class="panel-body">
+                    <div id="config-container">
+                        <p class="muted">Select a device and click "Load Config" to view settings.</p>
+                    </div>
+                    <div id="config-forms" style="display:none">
+                        <div class="config-section">
+                            <h3>Owner</h3>
+                            <div class="config-row">
+                                <label>Long Name</label>
+                                <input id="cfg-long-name" type="text" class="input" placeholder="Device name">
+                            </div>
+                            <div class="config-row">
+                                <label>Short Name</label>
+                                <input id="cfg-short-name" type="text" class="input" maxlength="4" placeholder="4 char">
+                            </div>
+                            <button id="btn-save-owner" class="btn btn-primary btn-sm">Save Owner</button>
+                        </div>
+                        <div class="config-section">
+                            <h3>Fixed Position</h3>
+                            <div class="config-row">
+                                <label>Latitude</label>
+                                <input id="cfg-lat" type="number" step="0.0001" class="input" placeholder="63.9058">
+                            </div>
+                            <div class="config-row">
+                                <label>Longitude</label>
+                                <input id="cfg-lon" type="number" step="0.0001" class="input" placeholder="19.7617">
+                            </div>
+                            <div class="config-row">
+                                <label>Altitude (m)</label>
+                                <input id="cfg-alt" type="number" class="input" placeholder="0" value="0">
+                            </div>
+                            <button id="btn-save-position" class="btn btn-primary btn-sm">Set Position</button>
+                            <button id="btn-remove-position" class="btn btn-danger btn-sm">Remove Fixed Position</button>
+                        </div>
+                        <div class="config-section">
+                            <h3>LoRa Settings</h3>
+                            <div id="lora-info" class="config-info"></div>
+                        </div>
+                        <div class="config-section">
+                            <h3>Channels</h3>
+                            <div id="channel-info" class="config-info"></div>
+                        </div>
+                        <div class="config-section">
+                            <h3>Position Config</h3>
+                            <div id="position-info" class="config-info"></div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <!-- Toast container for notifications -->
+    <div id="toast-container"></div>
+
+    <!-- Audio for message notifications -->
+    <audio id="notif-sound" preload="auto">
+        <source src="data:audio/wav;base64,UklGRlQFAABXQVZFZm10IBAAAAABAAEAESsAABErAAABAAgAZGF0YTAFAACAf4B/f4GAgH9/gICAf3+AgH9/gICAgH9/f4CAgH9/gIB/f4CAgH+AgIB/f39/gICAgH9/f4CAgH+AkaCvuMDEyMrJx8S/uLClmI2EfXl4eXuAh46VnKOpsLW5u7y7ubazr6qloJyYlZOTlJWYm5+jpqmrra6urq2sqaeloZ6bmpiYmZqcnqGjpaeorK+ys7W3ubu8u7m3tbKvq6ejoJ2amJeXmJqdn6KlqKuusLKztLW1tLOyr6yppqOfnZuamp2foqWnqa2wsrS1tba2tbOxr62rqaelo6Gfn5+goqSlpqiqq62ur7CwsK+urKupp6alpKOioqKipKWmp6ipqqusra2trKuqqKalpKOioqKjpKWmp6mqq6ytra6urq2sq6qpqKalpKOjo6SlpqeoqaqrrK2trq6urq2sq6qpqKempaSlpaanqKmqq6ytra2urq6trKuqqainpqWlpaanqKmqq6ytra6urq6trKuqqainpqampqanqKmqq6ysra2traysq6qpqKenp6anqKipqqusrK2tra2srKuqqamoqKenp6iqqqusrK2tra2trKyrqqmpqainp6eoqKmqq6ysra2traysq6qpqKenpqanp6ipqqusrKytraysq6uqqamoqKeoqKmqq6usray=" type="audio/wav">
+    </audio>
+
+    <script src="/static/js/dashboard.js"></script>
+</body>
+</html>
