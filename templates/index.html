@@ -73,6 +73,10 @@
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
             Config
         </button>
+        <button class="tab-btn" data-tab="tab-mqtt">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14"/><path d="M12 5v14"/><circle cx="5" cy="5" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/><circle cx="12" cy="12" r="2"/></svg>
+            MQTT <span id="mqtt-rate" class="badge badge-tab">0/s</span>
+        </button>
     </nav>
 
     <!-- ══ TAB: Dashboard ══════════════════════════════════════════════ -->
@@ -361,6 +365,142 @@
                         <div class="config-section">
                             <h3>Position Config</h3>
                             <div id="position-info" class="config-info"></div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <!-- ══ TAB: MQTT ═══════════════════════════════════════════════════ -->
+    <main id="tab-mqtt" class="tab-content">
+        <div class="dashboard mqtt-dashboard">
+            <!-- MQTT Status & Controls -->
+            <section class="panel mqtt-status-panel">
+                <div class="panel-header">
+                    <h2>MQTT Broker</h2>
+                    <div class="panel-actions">
+                        <span id="mqtt-connection-badge" class="badge badge-offline">Disconnected</span>
+                        <button id="btn-mqtt-connect" class="btn btn-sm btn-reconnect">Connect</button>
+                        <button id="btn-mqtt-disconnect" class="btn btn-sm btn-disconnect">Disconnect</button>
+                    </div>
+                </div>
+                <div class="panel-body">
+                    <div class="mqtt-stats-grid" id="mqtt-stats-container">
+                        <div class="mqtt-stat-card">
+                            <span class="mqtt-stat-label">Broker</span>
+                            <span class="mqtt-stat-value" id="mqtt-stat-broker">—</span>
+                        </div>
+                        <div class="mqtt-stat-card">
+                            <span class="mqtt-stat-label">Messages</span>
+                            <span class="mqtt-stat-value" id="mqtt-stat-msgs">0</span>
+                        </div>
+                        <div class="mqtt-stat-card">
+                            <span class="mqtt-stat-label">Rate</span>
+                            <span class="mqtt-stat-value" id="mqtt-stat-rate">0/s</span>
+                        </div>
+                        <div class="mqtt-stat-card">
+                            <span class="mqtt-stat-label">Decoded</span>
+                            <span class="mqtt-stat-value" id="mqtt-stat-decoded">0</span>
+                        </div>
+                        <div class="mqtt-stat-card">
+                            <span class="mqtt-stat-label">MQTT Nodes</span>
+                            <span class="mqtt-stat-value" id="mqtt-stat-nodes">0</span>
+                        </div>
+                        <div class="mqtt-stat-card">
+                            <span class="mqtt-stat-label">Uptime</span>
+                            <span class="mqtt-stat-value" id="mqtt-stat-uptime">—</span>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- MQTT Sub-tabs -->
+            <section class="panel mqtt-content-panel">
+                <div class="panel-header">
+                    <div class="mqtt-sub-tabs">
+                        <button class="mqtt-sub-tab active" data-mqtt-tab="mqtt-feed-tab">Live Feed</button>
+                        <button class="mqtt-sub-tab" data-mqtt-tab="mqtt-nodes-tab">Nodes <span id="mqtt-node-count" class="badge badge-tab">0</span></button>
+                        <button class="mqtt-sub-tab" data-mqtt-tab="mqtt-map-tab">Map</button>
+                        <button class="mqtt-sub-tab" data-mqtt-tab="mqtt-send-tab">Send</button>
+                        <button class="mqtt-sub-tab" data-mqtt-tab="mqtt-device-tab">Device Config</button>
+                    </div>
+                    <div class="panel-actions">
+                        <select id="mqtt-feed-filter" class="input input-sm" title="Filter by portnum">
+                            <option value="">All packets</option>
+                            <option value="TEXT_MESSAGE_APP">Text Messages</option>
+                            <option value="POSITION_APP">Position</option>
+                            <option value="NODEINFO_APP">Node Info</option>
+                            <option value="TELEMETRY_APP">Telemetry</option>
+                            <option value="NEIGHBORINFO_APP">Neighbor Info</option>
+                            <option value="MAP_REPORT_APP">Map Report</option>
+                            <option value="TRACEROUTE_APP">Traceroute</option>
+                        </select>
+                        <button id="btn-mqtt-clear-feed" class="btn btn-sm">Clear</button>
+                    </div>
+                </div>
+                <div class="panel-body">
+                    <!-- Live Feed -->
+                    <div id="mqtt-feed-tab" class="mqtt-sub-content active">
+                        <div id="mqtt-feed-container" class="mqtt-feed">
+                            <p class="muted">Waiting for MQTT packets…</p>
+                        </div>
+                    </div>
+
+                    <!-- MQTT Nodes -->
+                    <div id="mqtt-nodes-tab" class="mqtt-sub-content" style="display:none">
+                        <div class="mqtt-nodes-toolbar">
+                            <input id="mqtt-node-search" type="text" class="input input-sm" placeholder="Search MQTT nodes…" autocomplete="off">
+                            <span id="mqtt-nodes-count-header" class="badge">0</span>
+                        </div>
+                        <div class="table-wrap">
+                            <table id="mqtt-nodes-table">
+                                <thead>
+                                    <tr>
+                                        <th>Name</th>
+                                        <th>Short</th>
+                                        <th>ID</th>
+                                        <th>HW</th>
+                                        <th>Role</th>
+                                        <th>Position</th>
+                                        <th>Gateway</th>
+                                        <th>Packets</th>
+                                        <th>Last Seen</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="mqtt-nodes-body">
+                                    <tr><td colspan="9" class="muted">No MQTT nodes discovered yet.</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- MQTT Map -->
+                    <div id="mqtt-map-tab" class="mqtt-sub-content" style="display:none">
+                        <div class="mqtt-map-wrap">
+                            <div id="mqtt-map"></div>
+                        </div>
+                    </div>
+
+                    <!-- Send via MQTT -->
+                    <div id="mqtt-send-tab" class="mqtt-sub-content" style="display:none">
+                        <form id="mqtt-send-form" class="mqtt-send-form">
+                            <div class="config-row">
+                                <label>Channel</label>
+                                <input id="mqtt-send-channel" type="text" class="input" value="LongFast" placeholder="LongFast">
+                            </div>
+                            <div class="config-row">
+                                <label>Message</label>
+                                <textarea id="mqtt-send-text" class="input" rows="3" placeholder="Type message…"></textarea>
+                            </div>
+                            <button type="submit" class="btn btn-primary">Send via MQTT</button>
+                        </form>
+                    </div>
+
+                    <!-- Device MQTT Config -->
+                    <div id="mqtt-device-tab" class="mqtt-sub-content" style="display:none">
+                        <div id="mqtt-device-config-container">
+                            <p class="muted">Loading device MQTT configuration…</p>
                         </div>
                     </div>
                 </div>

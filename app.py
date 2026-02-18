@@ -10,6 +10,9 @@ statistics, and remote configuration.
 import os
 import json
 import time
+import uuid
+import struct
+import base64
 import threading
 import traceback
 from datetime import datetime, timezone
@@ -21,6 +24,10 @@ from flask_socketio import SocketIO
 import meshtastic
 import meshtastic.tcp_interface
 from pubsub import pub
+
+import paho.mqtt.client as paho_mqtt
+from meshtastic.protobuf import mqtt_pb2, mesh_pb2, portnums_pb2
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 import config
 
@@ -44,6 +51,26 @@ topology_edges = {}   # "from_id->to_id" -> { from, to, snr, rssi, lastSeen }
 # Traceroute results
 traceroute_results = {}  # request_id -> { status, route, ... }
 traceroute_counter = 0
+
+# ── MQTT State ───────────────────────────────────────────────────────────────
+
+mqtt_client = None
+mqtt_connected = False
+mqtt_feed = []            # recent MQTT packets (ring buffer)
+mqtt_nodes = {}           # node_id -> { longName, shortName, hwModel, position, lastSeen, ... }
+mqtt_stats = {
+    "connected": False,
+    "broker": "",
+    "msg_count": 0,
+    "msg_rate": 0,          # msgs/sec (rolling avg)
+    "decoded_count": 0,
+    "last_msg_at": None,
+    "subscriptions": [],
+    "start_time": None,
+}
+mqtt_rate_window = []     # timestamps for rolling rate calculation
+MAX_MQTT_FEED = 500
+MQTT_DEFAULT_KEY = base64.b64decode("1PG7OiApAADU8bs6ICkAAA==")  # default Meshtastic AES key
 
 
 # ── Meshtastic Connection Helpers ────────────────────────────────────────────
@@ -91,11 +118,19 @@ def on_receive(packet, interface):
             if hasattr(telemetry, 'DESCRIPTOR'):
                 from google.protobuf.json_format import MessageToDict
                 telemetry = MessageToDict(telemetry)
+            elif not isinstance(telemetry, dict):
+                try:
+                    telemetry = dict(telemetry)
+                except Exception:
+                    telemetry = {}
             _record_stats(from_id, packet, telemetry)
-            socketio.emit("telemetry_update", {
-                "from": from_id,
-                "telemetry": telemetry,
-            })
+            try:
+                socketio.emit("telemetry_update", {
+                    "from": from_id,
+                    "telemetry": telemetry,
+                })
+            except TypeError:
+                pass  # skip unserializable telemetry
 
         elif portnum == "TRACEROUTE_APP":
             _handle_traceroute_response(packet, interface)
@@ -288,6 +323,338 @@ def disconnect_all():
                 print(f"⨯ Disconnected {name}")
             except Exception:
                 pass
+
+
+# ── MQTT Module ──────────────────────────────────────────────────────────────
+
+def _mqtt_decrypt(mp, key=None):
+    """Decrypt a MeshPacket's encrypted field using AES-128-CTR."""
+    if key is None:
+        key = MQTT_DEFAULT_KEY
+    try:
+        nonce = struct.pack("<II", mp.id, getattr(mp, "from")) + b"\x00" * 8
+        cipher = Cipher(algorithms.AES(key), modes.CTR(nonce))
+        dec = cipher.decryptor()
+        plaintext = dec.update(mp.encrypted) + dec.finalize()
+        data = mesh_pb2.Data()
+        data.ParseFromString(plaintext)
+        return data
+    except Exception:
+        return None
+
+
+def _mqtt_decode_payload(portnum, payload):
+    """Decode a Meshtastic payload bytes into a dict based on portnum."""
+    result = {}
+    try:
+        if portnum == portnums_pb2.TEXT_MESSAGE_APP:
+            result["text"] = payload.decode("utf-8", errors="replace")
+        elif portnum == portnums_pb2.POSITION_APP:
+            p = mesh_pb2.Position()
+            p.ParseFromString(payload)
+            result["latitude"] = p.latitude_i / 1e7 if p.latitude_i else None
+            result["longitude"] = p.longitude_i / 1e7 if p.longitude_i else None
+            result["altitude"] = p.altitude if p.altitude else None
+            result["time"] = p.time if p.time else None
+        elif portnum == portnums_pb2.NODEINFO_APP:
+            u = mesh_pb2.User()
+            u.ParseFromString(payload)
+            result["longName"] = u.long_name
+            result["shortName"] = u.short_name
+            result["hwModel"] = u.hw_model
+            result["hwModelName"] = mesh_pb2.HardwareModel.Name(u.hw_model) if u.hw_model else "?"
+            result["macaddr"] = u.macaddr.hex() if u.macaddr else ""
+            result["role"] = mesh_pb2.Config.DeviceConfig.Role.Name(u.role) if u.role else ""
+        elif portnum == portnums_pb2.TELEMETRY_APP:
+            from meshtastic.protobuf import telemetry_pb2
+            t = telemetry_pb2.Telemetry()
+            t.ParseFromString(payload)
+            from google.protobuf.json_format import MessageToDict
+            result = MessageToDict(t)
+        elif portnum == portnums_pb2.NEIGHBORINFO_APP:
+            from meshtastic.protobuf import mesh_pb2 as mpb
+            ni = mpb.NeighborInfo()
+            ni.ParseFromString(payload)
+            from google.protobuf.json_format import MessageToDict
+            result = MessageToDict(ni)
+        elif portnum == portnums_pb2.MAP_REPORT_APP:
+            result["type"] = "map_report"
+    except Exception:
+        pass
+    return result
+
+
+def _mqtt_process_packet(se):
+    """Process a ServiceEnvelope from MQTT into usable data."""
+    global mqtt_stats
+    mp = se.packet
+    from_id = f"!{getattr(mp, 'from'):08x}"
+    to_id = f"!{mp.to:08x}" if mp.to != 0xFFFFFFFF else "^all"
+    channel = se.channel_id or ""
+    gateway = se.gateway_id or ""
+    ts = datetime.now(timezone.utc).isoformat()
+
+    data = None
+    portnum = 0
+    portname = "ENCRYPTED"
+
+    # Try decoded field first (some brokers send pre-decoded)
+    if mp.HasField("decoded"):
+        data = mp.decoded
+        portnum = data.portnum
+        portname = portnums_pb2.PortNum.Name(portnum) if portnum else "UNKNOWN"
+    elif mp.encrypted:
+        # Try default key decryption
+        dec = _mqtt_decrypt(mp)
+        if dec and dec.portnum:
+            data = dec
+            portnum = dec.portnum
+            portname = portnums_pb2.PortNum.Name(portnum) if portnum else "UNKNOWN"
+
+    # Decode the payload
+    decoded_payload = {}
+    if data and data.payload:
+        decoded_payload = _mqtt_decode_payload(portnum, data.payload)
+        mqtt_stats["decoded_count"] += 1
+
+    # Update MQTT node database
+    _mqtt_update_node(from_id, portnum, decoded_payload, mp, channel, gateway, ts)
+
+    # Build feed entry
+    entry = {
+        "timestamp": ts,
+        "from": from_id,
+        "to": to_id,
+        "channel": channel,
+        "gateway": gateway,
+        "portnum": portname,
+        "rxSnr": mp.rx_snr if mp.rx_snr else None,
+        "rxRssi": mp.rx_rssi if mp.rx_rssi else None,
+        "hopStart": mp.hop_start if mp.hop_start else None,
+        "hopLimit": mp.hop_limit if mp.hop_limit else None,
+        "viaMqtt": mp.via_mqtt,
+        "encrypted": bool(mp.encrypted) and not mp.HasField("decoded"),
+        "decoded": bool(data),
+        "payload": decoded_payload,
+    }
+
+    mqtt_feed.append(entry)
+    if len(mqtt_feed) > MAX_MQTT_FEED:
+        mqtt_feed.pop(0)
+
+    # Update rate stats
+    now = time.time()
+    mqtt_rate_window.append(now)
+    # Keep last 60s of timestamps
+    cutoff = now - 60
+    while mqtt_rate_window and mqtt_rate_window[0] < cutoff:
+        mqtt_rate_window.pop(0)
+    mqtt_stats["msg_rate"] = round(len(mqtt_rate_window) / 60.0, 1)
+    mqtt_stats["msg_count"] += 1
+    mqtt_stats["last_msg_at"] = ts
+
+    # Emit to dashboard
+    socketio.emit("mqtt_packet", entry)
+    return entry
+
+
+def _mqtt_update_node(node_id, portnum, payload, mp, channel, gateway, ts):
+    """Update the MQTT-discovered node database."""
+    if node_id not in mqtt_nodes:
+        mqtt_nodes[node_id] = {
+            "id": node_id,
+            "longName": None,
+            "shortName": None,
+            "hwModel": None,
+            "latitude": None,
+            "longitude": None,
+            "altitude": None,
+            "role": None,
+            "lastSeen": ts,
+            "lastChannel": channel,
+            "gateway": gateway,
+            "snr": None,
+            "rssi": None,
+            "packetCount": 0,
+        }
+
+    node = mqtt_nodes[node_id]
+    node["lastSeen"] = ts
+    node["packetCount"] += 1
+    if mp.rx_snr:
+        node["snr"] = mp.rx_snr
+    if mp.rx_rssi:
+        node["rssi"] = mp.rx_rssi
+    if gateway:
+        node["gateway"] = gateway
+    if channel:
+        node["lastChannel"] = channel
+
+    if portnum == portnums_pb2.NODEINFO_APP and payload:
+        if payload.get("longName"):
+            node["longName"] = payload["longName"]
+        if payload.get("shortName"):
+            node["shortName"] = payload["shortName"]
+        if payload.get("hwModelName"):
+            node["hwModel"] = payload["hwModelName"]
+        if payload.get("role"):
+            node["role"] = payload["role"]
+
+    if portnum == portnums_pb2.POSITION_APP and payload:
+        if payload.get("latitude") and payload.get("longitude"):
+            node["latitude"] = payload["latitude"]
+            node["longitude"] = payload["longitude"]
+        if payload.get("altitude"):
+            node["altitude"] = payload["altitude"]
+
+
+def _mqtt_on_connect(client, userdata, flags, reason_code, properties):
+    """MQTT on_connect callback."""
+    global mqtt_connected
+    if reason_code == 0:
+        mqtt_connected = True
+        root = getattr(config, "MQTT_ROOT_TOPIC", "msh/EU_868")
+        subs = [f"{root}/2/e/#", f"{root}/2/json/#"]
+        for s in subs:
+            client.subscribe(s, qos=0)
+        mqtt_stats["connected"] = True
+        mqtt_stats["broker"] = getattr(config, "MQTT_BROKER", "")
+        mqtt_stats["subscriptions"] = subs
+        mqtt_stats["start_time"] = datetime.now(timezone.utc).isoformat()
+        print(f"✓ MQTT connected to {mqtt_stats['broker']}")
+        print(f"  Subscribed: {', '.join(subs)}")
+        socketio.emit("mqtt_status", {"connected": True, "broker": mqtt_stats["broker"]})
+    else:
+        mqtt_connected = False
+        mqtt_stats["connected"] = False
+        print(f"✗ MQTT connection failed: {reason_code}")
+
+
+def _mqtt_on_disconnect(client, userdata, flags, reason_code, properties):
+    """MQTT on_disconnect callback."""
+    global mqtt_connected
+    mqtt_connected = False
+    mqtt_stats["connected"] = False
+    print(f"⨯ MQTT disconnected (reason: {reason_code})")
+    socketio.emit("mqtt_status", {"connected": False})
+
+
+def _mqtt_on_message(client, userdata, msg):
+    """MQTT on_message callback - parse ServiceEnvelope."""
+    try:
+        # Handle JSON topic
+        if "/json/" in msg.topic:
+            try:
+                jdata = json.loads(msg.payload)
+                entry = {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "from": jdata.get("from", "?"),
+                    "to": jdata.get("to", "?"),
+                    "channel": jdata.get("channel", ""),
+                    "gateway": "",
+                    "portnum": jdata.get("type", "JSON"),
+                    "rxSnr": jdata.get("snr"),
+                    "rxRssi": jdata.get("rssi"),
+                    "hopStart": None,
+                    "hopLimit": None,
+                    "viaMqtt": True,
+                    "encrypted": False,
+                    "decoded": True,
+                    "payload": jdata.get("payload", {}),
+                }
+                mqtt_feed.append(entry)
+                if len(mqtt_feed) > MAX_MQTT_FEED:
+                    mqtt_feed.pop(0)
+                mqtt_stats["msg_count"] += 1
+                socketio.emit("mqtt_packet", entry)
+            except json.JSONDecodeError:
+                pass
+            return
+
+        # Parse protobuf ServiceEnvelope
+        se = mqtt_pb2.ServiceEnvelope()
+        se.ParseFromString(msg.payload)
+        if se.packet:
+            _mqtt_process_packet(se)
+    except Exception:
+        pass
+
+
+def mqtt_connect():
+    """Connect to the configured MQTT broker."""
+    global mqtt_client
+    if not getattr(config, "MQTT_ENABLE", False):
+        print("MQTT disabled in config")
+        return
+
+    broker = getattr(config, "MQTT_BROKER", "mqtt.meshtastic.org")
+    port = getattr(config, "MQTT_PORT", 1883)
+    username = getattr(config, "MQTT_USERNAME", "meshdev")
+    password = getattr(config, "MQTT_PASSWORD", "large4cats")
+
+    client_id = f"meshtastic-dashboard-{uuid.uuid4().hex[:8]}"
+    print(f"→ MQTT connecting to {broker}:{port} …")
+
+    mqtt_client = paho_mqtt.Client(
+        paho_mqtt.CallbackAPIVersion.VERSION2,
+        client_id=client_id,
+    )
+    mqtt_client.username_pw_set(username, password)
+    mqtt_client.on_connect = _mqtt_on_connect
+    mqtt_client.on_disconnect = _mqtt_on_disconnect
+    mqtt_client.on_message = _mqtt_on_message
+
+    try:
+        mqtt_client.connect(broker, port, 60)
+        mqtt_client.loop_start()
+    except Exception as e:
+        print(f"✗ MQTT connection failed: {e}")
+        mqtt_stats["connected"] = False
+        mqtt_stats["error"] = str(e)
+
+
+def mqtt_disconnect():
+    """Disconnect from MQTT broker."""
+    global mqtt_client, mqtt_connected
+    if mqtt_client:
+        try:
+            mqtt_client.loop_stop()
+            mqtt_client.disconnect()
+        except Exception:
+            pass
+        mqtt_client = None
+    mqtt_connected = False
+    mqtt_stats["connected"] = False
+    print("⨯ MQTT disconnected")
+
+
+def mqtt_send_message(text, channel="LongFast"):
+    """Send a text message via MQTT."""
+    global mqtt_client
+    if not mqtt_client or not mqtt_connected:
+        return {"error": "MQTT not connected"}
+
+    root = getattr(config, "MQTT_ROOT_TOPIC", "msh/EU_868")
+    topic = f"{root}/2/e/{channel}"
+
+    # Build the MeshPacket
+    mp = mesh_pb2.MeshPacket()
+    mp.decoded.portnum = portnums_pb2.TEXT_MESSAGE_APP
+    mp.decoded.payload = text.encode("utf-8")
+    import random
+    mp.id = random.getrandbits(32)
+    mp.to = 0xFFFFFFFF  # broadcast
+
+    # Wrap in ServiceEnvelope
+    se = mqtt_pb2.ServiceEnvelope()
+    se.packet.CopyFrom(mp)
+    se.channel_id = channel
+
+    try:
+        result = mqtt_client.publish(topic, se.SerializeToString())
+        return {"status": "sent", "topic": topic, "mid": result.mid}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -560,6 +927,136 @@ def api_disconnect():
     dev["error"] = "manually disconnected"
     socketio.emit("device_disconnected", {"device": device_name})
     return jsonify({"status": "disconnected", "device": device_name})
+
+
+# ── MQTT API Routes ──────────────────────────────────────────────────────────
+
+@app.route("/api/mqtt/status")
+def api_mqtt_status():
+    """Return MQTT connection status and stats."""
+    return jsonify(mqtt_stats)
+
+
+@app.route("/api/mqtt/feed")
+def api_mqtt_feed():
+    """Return recent MQTT packets."""
+    limit = request.args.get("limit", 100, type=int)
+    portnum = request.args.get("portnum", None)
+    feed = mqtt_feed[-limit:]
+    if portnum:
+        feed = [p for p in feed if p.get("portnum") == portnum]
+    return jsonify(feed)
+
+
+@app.route("/api/mqtt/nodes")
+def api_mqtt_nodes():
+    """Return nodes discovered via MQTT."""
+    return jsonify(list(mqtt_nodes.values()))
+
+
+@app.route("/api/mqtt/connect", methods=["POST"])
+def api_mqtt_connect_route():
+    """Connect to the MQTT broker."""
+    if mqtt_connected:
+        return jsonify({"status": "already connected"})
+    mqtt_connect()
+    return jsonify({"status": "connecting"})
+
+
+@app.route("/api/mqtt/disconnect", methods=["POST"])
+def api_mqtt_disconnect_route():
+    """Disconnect from the MQTT broker."""
+    mqtt_disconnect()
+    return jsonify({"status": "disconnected"})
+
+
+@app.route("/api/mqtt/send", methods=["POST"])
+def api_mqtt_send():
+    """Send a text message via MQTT."""
+    data = request.json
+    text = data.get("text", "")
+    channel = data.get("channel", "LongFast")
+    if not text:
+        return jsonify({"error": "text is required"}), 400
+    result = mqtt_send_message(text, channel)
+    if "error" in result:
+        return jsonify(result), 500
+    return jsonify(result)
+
+
+@app.route("/api/mqtt/device-config")
+def api_mqtt_device_config():
+    """Return the MQTT configuration from connected devices."""
+    configs = []
+    for name, dev in devices.items():
+        iface = dev.get("interface")
+        if not iface or not dev.get("connected"):
+            configs.append({"device": name, "connected": False})
+            continue
+        try:
+            mc = iface.localNode.moduleConfig.mqtt
+            ch_mqtt = []
+            for ch in iface.localNode.channels:
+                if ch.role:
+                    ch_mqtt.append({
+                        "index": ch.index,
+                        "name": ch.settings.name or "(default)",
+                        "uplink": ch.settings.uplink_enabled,
+                        "downlink": ch.settings.downlink_enabled,
+                    })
+            configs.append({
+                "device": name,
+                "connected": True,
+                "enabled": mc.enabled,
+                "address": mc.address or "(default)",
+                "username": mc.username or "(default)",
+                "root": mc.root or "msh",
+                "encryption_enabled": mc.encryption_enabled,
+                "json_enabled": mc.json_enabled,
+                "tls_enabled": mc.tls_enabled,
+                "proxy_to_client_enabled": mc.proxy_to_client_enabled,
+                "map_reporting_enabled": mc.map_reporting_enabled,
+                "channels": ch_mqtt,
+            })
+        except Exception as e:
+            configs.append({"device": name, "connected": True, "error": str(e)})
+    return jsonify(configs)
+
+
+@app.route("/api/mqtt/device-config/set", methods=["POST"])
+def api_mqtt_set_device_config():
+    """Update MQTT configuration on a device."""
+    data = request.json
+    device_name = data.get("device")
+    dev = devices.get(device_name)
+    if not dev or not dev.get("connected"):
+        return jsonify({"error": "device not connected"}), 400
+
+    iface = dev["interface"]
+    results = []
+    try:
+        ln = iface.localNode
+
+        # Update channel uplink/downlink
+        if "channels" in data:
+            for ch_cfg in data["channels"]:
+                idx = ch_cfg.get("index", 0)
+                ch = ln.getChannelByChannelIndex(idx)
+                if ch:
+                    changed = False
+                    if "uplink" in ch_cfg:
+                        ch.settings.uplink_enabled = ch_cfg["uplink"]
+                        changed = True
+                    if "downlink" in ch_cfg:
+                        ch.settings.downlink_enabled = ch_cfg["downlink"]
+                        changed = True
+                    if changed:
+                        ln.writeChannel(idx)
+                        results.append(f"Ch{idx}: uplink={ch.settings.uplink_enabled}, downlink={ch.settings.downlink_enabled}")
+
+        return jsonify({"status": "ok", "results": results})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # ── Topology ─────────────────────────────────────────────────────────────────
@@ -866,6 +1363,7 @@ if __name__ == "__main__":
     print("  Meshtastic Dashboard")
     print("=" * 60)
     connect_all()
+    mqtt_connect()
     try:
         socketio.run(
             app,
@@ -875,4 +1373,5 @@ if __name__ == "__main__":
             use_reloader=False,
         )
     finally:
+        mqtt_disconnect()
         disconnect_all()

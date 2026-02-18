@@ -3,3 +3,5 @@ flask-socketio>=5.3
 meshtastic>=2.3
 gevent>=24.0
 gevent-websocket>=0.10
+paho-mqtt>=2.0
+cryptography>=42.0

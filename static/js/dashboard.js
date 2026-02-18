@@ -1296,6 +1296,411 @@ async function removePosition() {
     }
 }
 
+// ── MQTT Module ─────────────────────────────────────────────────────────
+
+let mqttMap = null;
+let mqttMapMarkers = {};
+let mqttNodesData = [];
+let mqttFeedPaused = false;
+
+function initMqtt() {
+    // Sub-tab switching
+    document.querySelectorAll(".mqtt-sub-tab").forEach(btn => {
+        btn.addEventListener("click", () => {
+            document.querySelectorAll(".mqtt-sub-tab").forEach(b => b.classList.remove("active"));
+            document.querySelectorAll(".mqtt-sub-content").forEach(c => {
+                c.classList.remove("active");
+                c.style.display = "none";
+            });
+            btn.classList.add("active");
+            const target = document.getElementById(btn.dataset.mqttTab);
+            if (target) {
+                target.classList.add("active");
+                target.style.display = "block";
+            }
+            // Lazy init MQTT map
+            if (btn.dataset.mqttTab === "mqtt-map-tab" && !mqttMap) {
+                initMqttMap();
+            }
+            if (btn.dataset.mqttTab === "mqtt-nodes-tab") {
+                loadMqttNodes();
+            }
+            if (btn.dataset.mqttTab === "mqtt-device-tab") {
+                loadMqttDeviceConfig();
+            }
+        });
+    });
+
+    // Connect / disconnect buttons
+    document.getElementById("btn-mqtt-connect").addEventListener("click", async () => {
+        try {
+            await fetch("/api/mqtt/connect", { method: "POST" });
+            showToast("MQTT connecting…", "info");
+            setTimeout(loadMqttStatus, 2000);
+        } catch (e) {
+            showToast("MQTT connect error: " + e.message, "error");
+        }
+    });
+    document.getElementById("btn-mqtt-disconnect").addEventListener("click", async () => {
+        try {
+            await fetch("/api/mqtt/disconnect", { method: "POST" });
+            showToast("MQTT disconnected", "info");
+            loadMqttStatus();
+        } catch (e) {
+            showToast("MQTT disconnect error: " + e.message, "error");
+        }
+    });
+
+    // Clear feed
+    document.getElementById("btn-mqtt-clear-feed").addEventListener("click", () => {
+        const container = document.getElementById("mqtt-feed-container");
+        container.innerHTML = getMqttFeedHeader();
+    });
+
+    // Feed filter
+    document.getElementById("mqtt-feed-filter").addEventListener("change", () => {
+        // Reload feed with filter
+        loadMqttFeed();
+    });
+
+    // MQTT node search
+    document.getElementById("mqtt-node-search").addEventListener("input", (e) => {
+        renderMqttNodes(mqttNodesData, e.target.value);
+    });
+
+    // Send form
+    document.getElementById("mqtt-send-form").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const text = document.getElementById("mqtt-send-text").value.trim();
+        const channel = document.getElementById("mqtt-send-channel").value.trim() || "LongFast";
+        if (!text) return;
+        try {
+            const res = await fetch("/api/mqtt/send", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ text, channel }),
+            });
+            const data = await res.json();
+            if (res.ok) {
+                showToast("Sent via MQTT", "success");
+                document.getElementById("mqtt-send-text").value = "";
+            } else {
+                showToast("MQTT send failed: " + (data.error || "unknown"), "error");
+            }
+        } catch (e) {
+            showToast("MQTT send error: " + e.message, "error");
+        }
+    });
+
+    // Initial feed header
+    const container = document.getElementById("mqtt-feed-container");
+    container.innerHTML = getMqttFeedHeader();
+}
+
+function getMqttFeedHeader() {
+    return `<div class="mqtt-feed-header">
+        <span>Time</span><span>From</span><span>To</span><span>Channel</span><span>Type</span><span>Payload</span>
+    </div>`;
+}
+
+async function loadMqttStatus() {
+    try {
+        const res = await fetch("/api/mqtt/status");
+        const stats = await res.json();
+        const badge = document.getElementById("mqtt-connection-badge");
+        badge.textContent = stats.connected ? "Connected" : "Disconnected";
+        badge.className = stats.connected ? "badge badge-online" : "badge badge-offline";
+
+        document.getElementById("mqtt-stat-broker").textContent = stats.broker || "—";
+        document.getElementById("mqtt-stat-msgs").textContent = (stats.msg_count || 0).toLocaleString();
+        document.getElementById("mqtt-stat-rate").textContent = (stats.msg_rate || 0) + "/s";
+        document.getElementById("mqtt-stat-decoded").textContent = (stats.decoded_count || 0).toLocaleString();
+        document.getElementById("mqtt-stat-nodes").textContent = Object.keys(mqttNodesData).length || "—";
+
+        // Tab badge
+        document.getElementById("mqtt-rate").textContent = (stats.msg_rate || 0) + "/s";
+
+        // Uptime
+        if (stats.start_time) {
+            const start = new Date(stats.start_time);
+            const diff = Math.floor((Date.now() - start.getTime()) / 1000);
+            const h = Math.floor(diff / 3600);
+            const m = Math.floor((diff % 3600) / 60);
+            document.getElementById("mqtt-stat-uptime").textContent = `${h}h ${m}m`;
+        } else {
+            document.getElementById("mqtt-stat-uptime").textContent = "—";
+        }
+    } catch (e) {
+        console.error("MQTT status error:", e);
+    }
+}
+
+async function loadMqttFeed() {
+    try {
+        const filter = document.getElementById("mqtt-feed-filter").value;
+        let url = "/api/mqtt/feed?limit=200";
+        if (filter) url += "&portnum=" + filter;
+        const res = await fetch(url);
+        const feed = await res.json();
+        const container = document.getElementById("mqtt-feed-container");
+        container.innerHTML = getMqttFeedHeader();
+        feed.forEach(p => appendMqttPacket(p));
+    } catch (e) {
+        console.error("MQTT feed error:", e);
+    }
+}
+
+function appendMqttPacket(pkt) {
+    const filter = document.getElementById("mqtt-feed-filter").value;
+    if (filter && pkt.portnum !== filter) return;
+
+    const container = document.getElementById("mqtt-feed-container");
+
+    // Auto-scroll detection
+    const isAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 50;
+
+    const ts = pkt.timestamp ? new Date(pkt.timestamp).toLocaleTimeString() : "?";
+    const payload = formatMqttPayload(pkt);
+    const portClass = `feed-port-${pkt.portnum || "UNKNOWN"}`;
+
+    const row = document.createElement("div");
+    row.className = "mqtt-feed-row";
+    row.innerHTML = `
+        <span class="feed-time">${ts}</span>
+        <span class="feed-from">${pkt.from || "?"}</span>
+        <span class="feed-to">${pkt.to || "?"}</span>
+        <span class="feed-channel">${pkt.channel || "—"}</span>
+        <span class="feed-port ${portClass}">${pkt.portnum || "?"}</span>
+        <span class="feed-payload" title="${escapeHtml(payload)}">${payload}</span>
+    `;
+    container.appendChild(row);
+
+    // Keep max 500 rows
+    const rows = container.querySelectorAll(".mqtt-feed-row");
+    if (rows.length > 500) rows[0].remove();
+
+    if (isAtBottom) {
+        container.scrollTop = container.scrollHeight;
+    }
+}
+
+function formatMqttPayload(pkt) {
+    const p = pkt.payload || {};
+    if (pkt.portnum === "TEXT_MESSAGE_APP" && p.text) return `"${p.text}"`;
+    if (pkt.portnum === "POSITION_APP" && p.latitude) return `${p.latitude.toFixed(4)}, ${p.longitude.toFixed(4)}`;
+    if (pkt.portnum === "NODEINFO_APP" && p.longName) return `${p.longName} (${p.shortName || "?"}) ${p.hwModelName || ""}`;
+    if (pkt.portnum === "TELEMETRY_APP") {
+        const dm = p.deviceMetrics || {};
+        if (dm.batteryLevel) return `bat:${dm.batteryLevel}% ch:${(dm.channelUtilization||0).toFixed(1)}%`;
+        const em = p.environmentMetrics || {};
+        if (em.temperature) return `temp:${em.temperature.toFixed(1)}°C`;
+        return JSON.stringify(p).substring(0, 60);
+    }
+    if (!pkt.decoded) return pkt.encrypted ? "🔒 encrypted" : "—";
+    if (Object.keys(p).length > 0) return JSON.stringify(p).substring(0, 80);
+    return "—";
+}
+
+function escapeHtml(str) {
+    return str.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+
+async function loadMqttNodes() {
+    try {
+        const res = await fetch("/api/mqtt/nodes");
+        mqttNodesData = await res.json();
+        document.getElementById("mqtt-node-count").textContent = mqttNodesData.length;
+        document.getElementById("mqtt-stat-nodes").textContent = mqttNodesData.length;
+        const search = document.getElementById("mqtt-node-search").value;
+        renderMqttNodes(mqttNodesData, search);
+    } catch (e) {
+        console.error("MQTT nodes error:", e);
+    }
+}
+
+function renderMqttNodes(nodes, search = "") {
+    const tbody = document.getElementById("mqtt-nodes-body");
+    let filtered = nodes;
+    if (search) {
+        const q = search.toLowerCase();
+        filtered = nodes.filter(n =>
+            (n.longName || "").toLowerCase().includes(q) ||
+            (n.shortName || "").toLowerCase().includes(q) ||
+            (n.id || "").toLowerCase().includes(q) ||
+            (n.hwModel || "").toLowerCase().includes(q)
+        );
+    }
+    // Sort by lastSeen desc
+    filtered.sort((a, b) => (b.lastSeen || "").localeCompare(a.lastSeen || ""));
+    document.getElementById("mqtt-nodes-count-header").textContent = filtered.length;
+
+    if (!filtered.length) {
+        tbody.innerHTML = '<tr><td colspan="9" class="muted">No nodes found.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = filtered.map(n => {
+        const pos = (n.latitude && n.longitude)
+            ? `${n.latitude.toFixed(4)}, ${n.longitude.toFixed(4)}` : "—";
+        const lastSeen = n.lastSeen ? new Date(n.lastSeen).toLocaleTimeString() : "—";
+        return `<tr>
+            <td>${n.longName || "<i>unknown</i>"}</td>
+            <td>${n.shortName || "—"}</td>
+            <td class="mono">${n.id || "—"}</td>
+            <td>${n.hwModel || "—"}</td>
+            <td>${n.role || "—"}</td>
+            <td>${pos}</td>
+            <td class="mono">${n.gateway || "—"}</td>
+            <td>${n.packetCount || 0}</td>
+            <td>${lastSeen}</td>
+        </tr>`;
+    }).join("");
+}
+
+function initMqttMap() {
+    const theme = document.documentElement.getAttribute("data-theme");
+    const tileUrl = theme === "dark"
+        ? "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+        : "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
+
+    mqttMap = L.map("mqtt-map").setView([55.0, 15.0], 5);
+    L.tileLayer(tileUrl, {
+        attribution: '&copy; OpenStreetMap contributors',
+        maxZoom: 19,
+    }).addTo(mqttMap);
+
+    // Load existing MQTT nodes onto map
+    updateMqttMap();
+}
+
+function updateMqttMap() {
+    if (!mqttMap) return;
+    const nodesWithPos = mqttNodesData.filter(n => n.latitude && n.longitude);
+
+    // Remove stale markers
+    for (const id in mqttMapMarkers) {
+        if (!nodesWithPos.find(n => n.id === id)) {
+            mqttMap.removeLayer(mqttMapMarkers[id]);
+            delete mqttMapMarkers[id];
+        }
+    }
+
+    nodesWithPos.forEach(n => {
+        const label = n.longName || n.shortName || n.id;
+        if (mqttMapMarkers[n.id]) {
+            mqttMapMarkers[n.id].setLatLng([n.latitude, n.longitude]);
+            mqttMapMarkers[n.id].setPopupContent(
+                `<b>${label}</b><br>ID: ${n.id}<br>HW: ${n.hwModel || "?"}<br>Packets: ${n.packetCount}`
+            );
+        } else {
+            const marker = L.circleMarker([n.latitude, n.longitude], {
+                radius: 5,
+                fillColor: "#8b5cf6",
+                color: "#6d28d9",
+                weight: 1,
+                fillOpacity: 0.8,
+            }).addTo(mqttMap);
+            marker.bindPopup(
+                `<b>${label}</b><br>ID: ${n.id}<br>HW: ${n.hwModel || "?"}<br>Packets: ${n.packetCount}`
+            );
+            mqttMapMarkers[n.id] = marker;
+        }
+    });
+
+    // Fit bounds if there are nodes
+    if (nodesWithPos.length > 0) {
+        const bounds = nodesWithPos.map(n => [n.latitude, n.longitude]);
+        mqttMap.fitBounds(bounds, { padding: [30, 30], maxZoom: 12 });
+    }
+}
+
+async function loadMqttDeviceConfig() {
+    try {
+        const res = await fetch("/api/mqtt/device-config");
+        const configs = await res.json();
+        const container = document.getElementById("mqtt-device-config-container");
+
+        if (!configs.length) {
+            container.innerHTML = '<p class="muted">No devices available.</p>';
+            return;
+        }
+
+        container.innerHTML = configs.map(cfg => {
+            if (!cfg.connected) {
+                return `<div class="mqtt-device-cfg">
+                    <h4>${cfg.device} <span class="badge badge-offline">Offline</span></h4>
+                </div>`;
+            }
+            if (cfg.error) {
+                return `<div class="mqtt-device-cfg">
+                    <h4>${cfg.device}</h4>
+                    <p class="muted">Error: ${cfg.error}</p>
+                </div>`;
+            }
+
+            const chRows = (cfg.channels || []).map(ch => `
+                <tr>
+                    <td>${ch.name}</td>
+                    <td>
+                        <label class="toggle-switch">
+                            <input type="checkbox" ${ch.uplink ? "checked" : ""}
+                                   onchange="toggleMqttChannel('${cfg.device}', ${ch.index}, 'uplink', this.checked)">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </td>
+                    <td>
+                        <label class="toggle-switch">
+                            <input type="checkbox" ${ch.downlink ? "checked" : ""}
+                                   onchange="toggleMqttChannel('${cfg.device}', ${ch.index}, 'downlink', this.checked)">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </td>
+                </tr>
+            `).join("");
+
+            return `<div class="mqtt-device-cfg">
+                <h4>${cfg.device} <span class="badge badge-online">Online</span></h4>
+                <div class="mqtt-cfg-grid">
+                    <span>MQTT Enabled: <strong>${cfg.enabled ? "✓ Yes" : "✗ No"}</strong></span>
+                    <span>Broker: <strong>${cfg.address}</strong></span>
+                    <span>Username: <strong>${cfg.username}</strong></span>
+                    <span>Root Topic: <strong>${cfg.root}</strong></span>
+                    <span>Encryption: <strong>${cfg.encryption_enabled ? "✓" : "✗"}</strong></span>
+                    <span>JSON: <strong>${cfg.json_enabled ? "✓" : "✗"}</strong></span>
+                    <span>TLS: <strong>${cfg.tls_enabled ? "✓" : "✗"}</strong></span>
+                    <span>Map Reporting: <strong>${cfg.map_reporting_enabled ? "✓" : "✗"}</strong></span>
+                </div>
+                ${chRows ? `<h5 style="font-size:.78rem;margin:.5rem 0 .25rem;color:var(--text-secondary)">Channel MQTT Settings</h5>
+                <table class="mqtt-ch-table">
+                    <thead><tr><th>Channel</th><th>Uplink</th><th>Downlink</th></tr></thead>
+                    <tbody>${chRows}</tbody>
+                </table>` : ""}
+            </div>`;
+        }).join("");
+    } catch (e) {
+        console.error("MQTT device config error:", e);
+    }
+}
+
+async function toggleMqttChannel(device, index, field, value) {
+    try {
+        const ch = { index };
+        ch[field] = value;
+        const res = await fetch("/api/mqtt/device-config/set", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ device, channels: [ch] }),
+        });
+        const data = await res.json();
+        if (res.ok) {
+            showToast(`MQTT ${field} ${value ? "enabled" : "disabled"} on Ch${index}`, "success");
+        } else {
+            showToast("Failed: " + (data.error || "unknown"), "error");
+        }
+    } catch (e) {
+        showToast("Error: " + e.message, "error");
+    }
+}
+
 // ── WebSocket Events ────────────────────────────────────────────────────
 
 function initSocket() {
@@ -1328,6 +1733,32 @@ function initSocket() {
         updateTracerouteResult(tr.id, tr);
     });
 
+    socket.on("mqtt_packet", (pkt) => {
+        appendMqttPacket(pkt);
+        // Update MQTT node in cache
+        if (pkt.from && pkt.portnum === "NODEINFO_APP" && pkt.payload) {
+            const existing = mqttNodesData.find(n => n.id === pkt.from);
+            if (existing) {
+                if (pkt.payload.longName) existing.longName = pkt.payload.longName;
+                if (pkt.payload.shortName) existing.shortName = pkt.payload.shortName;
+                if (pkt.payload.hwModelName) existing.hwModel = pkt.payload.hwModelName;
+            }
+        }
+        if (pkt.from && pkt.portnum === "POSITION_APP" && pkt.payload) {
+            const existing = mqttNodesData.find(n => n.id === pkt.from);
+            if (existing && pkt.payload.latitude) {
+                existing.latitude = pkt.payload.latitude;
+                existing.longitude = pkt.payload.longitude;
+            }
+        }
+    });
+
+    socket.on("mqtt_status", (status) => {
+        const badge = document.getElementById("mqtt-connection-badge");
+        badge.textContent = status.connected ? "Connected" : "Disconnected";
+        badge.className = status.connected ? "badge badge-online" : "badge badge-offline";
+    });
+
     socket.on("error", (data) => {
         showToast(data.message || "Error", "error");
     });
@@ -1346,10 +1777,12 @@ document.addEventListener("DOMContentLoaded", () => {
     initTopologyControls();
     initStatsNodeSelect();
     initConfig();
+    initMqtt();
     initSocket();
 
     // Initial load
     loadAll();
+    loadMqttStatus();
 
     // Refresh button
     document.getElementById("btn-refresh").addEventListener("click", loadAll);
@@ -1357,9 +1790,22 @@ document.addEventListener("DOMContentLoaded", () => {
     // Auto-refresh
     setInterval(loadAll, REFRESH_INTERVAL);
 
+    // MQTT status refresh (every 10s)
+    setInterval(loadMqttStatus, 10000);
+    // MQTT nodes refresh (every 30s)
+    setInterval(() => {
+        if (document.querySelector('.mqtt-sub-tab.active')?.dataset.mqttTab === 'mqtt-nodes-tab') {
+            loadMqttNodes();
+        }
+        if (document.querySelector('.mqtt-sub-tab.active')?.dataset.mqttTab === 'mqtt-map-tab') {
+            loadMqttNodes().then(() => updateMqttMap());
+        }
+    }, 30000);
+
     // Expose device actions to global scope for onclick handlers
     window.disconnectDevice = disconnectDevice;
     window.reconnectDevice = reconnectDevice;
+    window.toggleMqttChannel = toggleMqttChannel;
 });
 
 })();

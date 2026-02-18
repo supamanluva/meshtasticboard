@@ -28,3 +28,12 @@ TELEMETRY_INTERVAL = 30
 
 # Maximum number of messages to keep in memory
 MAX_MESSAGES = 500
+
+# ── MQTT Configuration ──────────────────────────────────────────────────
+# Broker your Meshtastic devices are publishing to
+MQTT_BROKER = os.environ.get("MQTT_BROKER", "mqtt.meshtastic.org")
+MQTT_PORT = int(os.environ.get("MQTT_PORT", 1883))
+MQTT_USERNAME = os.environ.get("MQTT_USERNAME", "meshdev")
+MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD", "large4cats")
+MQTT_ROOT_TOPIC = os.environ.get("MQTT_ROOT_TOPIC", "msh/EU_868")
+MQTT_ENABLE = os.environ.get("MQTT_ENABLE", "true").lower() == "true"
