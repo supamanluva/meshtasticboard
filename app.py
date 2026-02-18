@@ -73,6 +73,26 @@ MAX_MQTT_FEED = 500
 MQTT_DEFAULT_KEY = base64.b64decode("1PG7OiApAADU8bs6ICkAAA==")  # default Meshtastic AES key
 
 
+def _get_decryption_keys():
+    """Build a list of AES keys to try: device channel keys + default key."""
+    keys = []
+    for name, dev in devices.items():
+        iface = dev.get("interface")
+        if not iface or not dev.get("connected"):
+            continue
+        try:
+            for ch in iface.localNode.channels:
+                if ch.role and ch.settings.psk:
+                    psk = bytes(ch.settings.psk)
+                    if len(psk) in (16, 32) and psk not in keys:
+                        keys.append(psk)
+        except Exception:
+            pass
+    if MQTT_DEFAULT_KEY not in keys:
+        keys.append(MQTT_DEFAULT_KEY)
+    return keys
+
+
 # ── Meshtastic Connection Helpers ────────────────────────────────────────────
 
 def on_receive(packet, interface):
@@ -413,12 +433,14 @@ def _mqtt_process_packet(se):
         portnum = data.portnum
         portname = portnums_pb2.PortNum.Name(portnum) if portnum else "UNKNOWN"
     elif mp.encrypted:
-        # Try default key decryption
-        dec = _mqtt_decrypt(mp)
-        if dec and dec.portnum:
-            data = dec
-            portnum = dec.portnum
-            portname = portnums_pb2.PortNum.Name(portnum) if portnum else "UNKNOWN"
+        # Try all known keys (device channel keys + default)
+        for key in _get_decryption_keys():
+            dec = _mqtt_decrypt(mp, key)
+            if dec and dec.portnum:
+                data = dec
+                portnum = dec.portnum
+                portname = portnums_pb2.PortNum.Name(portnum) if portnum else "UNKNOWN"
+                break
 
     # Decode the payload
     decoded_payload = {}
@@ -442,7 +464,7 @@ def _mqtt_process_packet(se):
         "hopStart": mp.hop_start if mp.hop_start else None,
         "hopLimit": mp.hop_limit if mp.hop_limit else None,
         "viaMqtt": mp.via_mqtt,
-        "encrypted": bool(mp.encrypted) and not mp.HasField("decoded"),
+        "encrypted": bool(mp.encrypted) and not data,
         "decoded": bool(data),
         "payload": decoded_payload,
     }

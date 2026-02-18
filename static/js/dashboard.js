@@ -1363,6 +1363,11 @@ function initMqtt() {
         loadMqttFeed();
     });
 
+    // Hide encrypted toggle
+    document.getElementById("mqtt-hide-encrypted").addEventListener("change", () => {
+        loadMqttFeed();
+    });
+
     // MQTT node search
     document.getElementById("mqtt-node-search").addEventListener("input", (e) => {
         renderMqttNodes(mqttNodesData, e.target.value);
@@ -1453,6 +1458,9 @@ async function loadMqttFeed() {
 function appendMqttPacket(pkt) {
     const filter = document.getElementById("mqtt-feed-filter").value;
     if (filter && pkt.portnum !== filter) return;
+
+    const hideEncrypted = document.getElementById("mqtt-hide-encrypted").checked;
+    if (hideEncrypted && pkt.encrypted && !pkt.decoded) return;
 
     const container = document.getElementById("mqtt-feed-container");
 

@@ -435,7 +435,11 @@
                             <option value="NEIGHBORINFO_APP">Neighbor Info</option>
                             <option value="MAP_REPORT_APP">Map Report</option>
                             <option value="TRACEROUTE_APP">Traceroute</option>
+                            <option value="ENCRYPTED">Encrypted Only</option>
                         </select>
+                        <label class="toggle-label" style="font-size:.75rem;margin:0 .5rem;white-space:nowrap" title="Hide packets that could not be decrypted">
+                            <input type="checkbox" id="mqtt-hide-encrypted" checked> Hide encrypted
+                        </label>
                         <button id="btn-mqtt-clear-feed" class="btn btn-sm">Clear</button>
                     </div>
                 </div>
