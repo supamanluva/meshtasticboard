@@ -107,9 +107,18 @@ def on_receive(packet, interface):
             socketio.emit("new_message", msg)
 
         elif portnum == "POSITION_APP":
+            position = decoded.get("position", {})
+            if hasattr(position, 'DESCRIPTOR'):
+                from google.protobuf.json_format import MessageToDict
+                position = MessageToDict(position)
+            elif not isinstance(position, dict):
+                try:
+                    position = dict(position)
+                except Exception:
+                    position = {}
             socketio.emit("position_update", {
                 "from": from_id,
-                "position": decoded.get("position", {}),
+                "position": position,
             })
 
         elif portnum == "TELEMETRY_APP":
@@ -591,15 +600,19 @@ def mqtt_connect():
     port = getattr(config, "MQTT_PORT", 1883)
     username = getattr(config, "MQTT_USERNAME", "meshdev")
     password = getattr(config, "MQTT_PASSWORD", "large4cats")
+    use_tls = getattr(config, "MQTT_TLS", False)
 
     client_id = f"meshtastic-dashboard-{uuid.uuid4().hex[:8]}"
-    print(f"→ MQTT connecting to {broker}:{port} …")
+    print(f"→ MQTT connecting to {broker}:{port} (TLS={'yes' if use_tls else 'no'}) …")
 
     mqtt_client = paho_mqtt.Client(
         paho_mqtt.CallbackAPIVersion.VERSION2,
         client_id=client_id,
     )
     mqtt_client.username_pw_set(username, password)
+    if use_tls:
+        import ssl
+        mqtt_client.tls_set(cert_reqs=ssl.CERT_REQUIRED, tls_version=ssl.PROTOCOL_TLS_CLIENT)
     mqtt_client.on_connect = _mqtt_on_connect
     mqtt_client.on_disconnect = _mqtt_on_disconnect
     mqtt_client.on_message = _mqtt_on_message
@@ -1036,8 +1049,41 @@ def api_mqtt_set_device_config():
     results = []
     try:
         ln = iface.localNode
+        mc = ln.moduleConfig.mqtt
+        mqtt_changed = False
 
-        # Update channel uplink/downlink
+        # ── MQTT module config fields ──
+        string_fields = {
+            "address": "address",
+            "username": "username",
+            "password": "password",
+            "root": "root",
+        }
+        for key, field in string_fields.items():
+            if key in data:
+                setattr(mc, field, data[key])
+                mqtt_changed = True
+                results.append(f"{field}={data[key]}")
+
+        bool_fields = {
+            "enabled": "enabled",
+            "encryption_enabled": "encryption_enabled",
+            "json_enabled": "json_enabled",
+            "tls_enabled": "tls_enabled",
+            "proxy_to_client_enabled": "proxy_to_client_enabled",
+            "map_reporting_enabled": "map_reporting_enabled",
+        }
+        for key, field in bool_fields.items():
+            if key in data:
+                setattr(mc, field, bool(data[key]))
+                mqtt_changed = True
+                results.append(f"{field}={data[key]}")
+
+        if mqtt_changed:
+            ln.writeConfig("mqtt")
+            results.insert(0, "MQTT config written")
+
+        # ── Channel uplink/downlink ──
         if "channels" in data:
             for ch_cfg in data["channels"]:
                 idx = ch_cfg.get("index", 0)

@@ -1657,17 +1657,35 @@ async function loadMqttDeviceConfig() {
                 </tr>
             `).join("");
 
+            const devId = cfg.device.replace(/[^a-zA-Z0-9]/g, '_');
             return `<div class="mqtt-device-cfg">
                 <h4>${cfg.device} <span class="badge badge-online">Online</span></h4>
-                <div class="mqtt-cfg-grid">
-                    <span>MQTT Enabled: <strong>${cfg.enabled ? "✓ Yes" : "✗ No"}</strong></span>
-                    <span>Broker: <strong>${cfg.address}</strong></span>
-                    <span>Username: <strong>${cfg.username}</strong></span>
-                    <span>Root Topic: <strong>${cfg.root}</strong></span>
-                    <span>Encryption: <strong>${cfg.encryption_enabled ? "✓" : "✗"}</strong></span>
-                    <span>JSON: <strong>${cfg.json_enabled ? "✓" : "✗"}</strong></span>
-                    <span>TLS: <strong>${cfg.tls_enabled ? "✓" : "✗"}</strong></span>
-                    <span>Map Reporting: <strong>${cfg.map_reporting_enabled ? "✓" : "✗"}</strong></span>
+                <div class="mqtt-cfg-form">
+                    <div class="config-row">
+                        <label>Broker Address</label>
+                        <input type="text" class="input" id="mqtt-cfg-address-${devId}" value="${cfg.address === '(default)' ? '' : cfg.address}" placeholder="mqtt.meshtastic.org">
+                    </div>
+                    <div class="config-row">
+                        <label>Username</label>
+                        <input type="text" class="input" id="mqtt-cfg-username-${devId}" value="${cfg.username === '(default)' ? '' : cfg.username}" placeholder="meshdev">
+                    </div>
+                    <div class="config-row">
+                        <label>Password</label>
+                        <input type="password" class="input" id="mqtt-cfg-password-${devId}" value="" placeholder="(unchanged)">
+                    </div>
+                    <div class="config-row">
+                        <label>Root Topic</label>
+                        <input type="text" class="input" id="mqtt-cfg-root-${devId}" value="${cfg.root}" placeholder="msh">
+                    </div>
+                    <div class="mqtt-cfg-toggles">
+                        <label class="toggle-label"><input type="checkbox" id="mqtt-cfg-enabled-${devId}" ${cfg.enabled ? 'checked' : ''}> MQTT Enabled</label>
+                        <label class="toggle-label"><input type="checkbox" id="mqtt-cfg-encryption-${devId}" ${cfg.encryption_enabled ? 'checked' : ''}> Encryption</label>
+                        <label class="toggle-label"><input type="checkbox" id="mqtt-cfg-json-${devId}" ${cfg.json_enabled ? 'checked' : ''}> JSON Output</label>
+                        <label class="toggle-label"><input type="checkbox" id="mqtt-cfg-tls-${devId}" ${cfg.tls_enabled ? 'checked' : ''}> TLS</label>
+                        <label class="toggle-label"><input type="checkbox" id="mqtt-cfg-proxy-${devId}" ${cfg.proxy_to_client_enabled ? 'checked' : ''}> Proxy to Client</label>
+                        <label class="toggle-label"><input type="checkbox" id="mqtt-cfg-map-${devId}" ${cfg.map_reporting_enabled ? 'checked' : ''}> Map Reporting</label>
+                    </div>
+                    <button class="btn btn-primary btn-sm" onclick="saveMqttDeviceConfig('${cfg.device}', '${devId}')">Save MQTT Config</button>
                 </div>
                 ${chRows ? `<h5 style="font-size:.78rem;margin:.5rem 0 .25rem;color:var(--text-secondary)">Channel MQTT Settings</h5>
                 <table class="mqtt-ch-table">
@@ -1693,6 +1711,44 @@ async function toggleMqttChannel(device, index, field, value) {
         const data = await res.json();
         if (res.ok) {
             showToast(`MQTT ${field} ${value ? "enabled" : "disabled"} on Ch${index}`, "success");
+        } else {
+            showToast("Failed: " + (data.error || "unknown"), "error");
+        }
+    } catch (e) {
+        showToast("Error: " + e.message, "error");
+    }
+}
+
+async function saveMqttDeviceConfig(device, devId) {
+    try {
+        const payload = { device };
+        const address = document.getElementById(`mqtt-cfg-address-${devId}`).value.trim();
+        const username = document.getElementById(`mqtt-cfg-username-${devId}`).value.trim();
+        const password = document.getElementById(`mqtt-cfg-password-${devId}`).value;
+        const root = document.getElementById(`mqtt-cfg-root-${devId}`).value.trim();
+
+        payload.address = address;
+        payload.username = username;
+        payload.root = root;
+        if (password) payload.password = password;
+
+        payload.enabled = document.getElementById(`mqtt-cfg-enabled-${devId}`).checked;
+        payload.encryption_enabled = document.getElementById(`mqtt-cfg-encryption-${devId}`).checked;
+        payload.json_enabled = document.getElementById(`mqtt-cfg-json-${devId}`).checked;
+        payload.tls_enabled = document.getElementById(`mqtt-cfg-tls-${devId}`).checked;
+        payload.proxy_to_client_enabled = document.getElementById(`mqtt-cfg-proxy-${devId}`).checked;
+        payload.map_reporting_enabled = document.getElementById(`mqtt-cfg-map-${devId}`).checked;
+
+        const res = await fetch("/api/mqtt/device-config/set", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (res.ok) {
+            showToast(`MQTT config saved for ${device}`, "success");
+            // Clear password field after save
+            document.getElementById(`mqtt-cfg-password-${devId}`).value = "";
         } else {
             showToast("Failed: " + (data.error || "unknown"), "error");
         }
@@ -1806,6 +1862,7 @@ document.addEventListener("DOMContentLoaded", () => {
     window.disconnectDevice = disconnectDevice;
     window.reconnectDevice = reconnectDevice;
     window.toggleMqttChannel = toggleMqttChannel;
+    window.saveMqttDeviceConfig = saveMqttDeviceConfig;
 });
 
 })();
