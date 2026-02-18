@@ -345,11 +345,21 @@ def _device_summary(name, dev):
     device_long_name = None
     try:
         my_node_num = iface.myInfo.my_node_num
+        # Resolve hardware model name from protobuf enum
+        hw_model_str = "?"
+        try:
+            from meshtastic.protobuf.mesh_pb2 import HardwareModel
+            hw_model_int = getattr(iface.metadata, "hw_model", 0)
+            hw_model_str = HardwareModel.Name(hw_model_int) if hw_model_int else "?"
+        except Exception:
+            hw_model_str = str(getattr(iface.metadata, "hw_model", "?"))
         my_info = {
             "my_node_num": my_node_num,
             "firmware_version": getattr(iface.metadata, "firmware_version", ""),
-            "hw_model": str(getattr(iface.myInfo, "hw_model", "")),
-            "num_online_nodes": getattr(iface.myInfo, "num_online_local_nodes", 0),
+            "hw_model": hw_model_str,
+            "num_online_nodes": len(iface.nodes) if iface.nodes else 0,
+            "nodedb_count": getattr(iface.myInfo, "nodedb_count", 0),
+            "reboot_count": getattr(iface.myInfo, "reboot_count", 0),
         }
         # Get the real device name from the node's own user info
         if iface.nodes:
@@ -529,6 +539,27 @@ def api_reconnect():
             success = connect_device(dev_cfg)
             return jsonify({"status": "connected" if success else "failed"})
     return jsonify({"error": "device not found in config"}), 404
+
+
+@app.route("/api/disconnect", methods=["POST"])
+def api_disconnect():
+    """Disconnect from a specific device."""
+    data = request.json
+    device_name = data.get("device")
+    dev = devices.get(device_name)
+    if not dev:
+        return jsonify({"error": "device not found"}), 404
+    iface = dev.get("interface")
+    if iface:
+        try:
+            iface.close()
+        except Exception:
+            pass
+    dev["interface"] = None
+    dev["connected"] = False
+    dev["error"] = "manually disconnected"
+    socketio.emit("device_disconnected", {"device": device_name})
+    return jsonify({"status": "disconnected", "device": device_name})
 
 
 # ── Topology ─────────────────────────────────────────────────────────────────

@@ -348,6 +348,25 @@ body {
     color: var(--text-muted);
     font-weight: 400;
 }
+.device-actions {
+    display: flex;
+    gap: .5rem;
+    margin-top: .5rem;
+    padding-top: .4rem;
+    border-top: 1px solid var(--border);
+}
+.btn-disconnect {
+    background: var(--red);
+    color: #fff;
+    border: none;
+}
+.btn-disconnect:hover { opacity: .85; }
+.btn-reconnect {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+}
+.btn-reconnect:hover { opacity: .85; }
 
 /* ── Nodes Table ────────────────────────────────────────────────────────── */
 

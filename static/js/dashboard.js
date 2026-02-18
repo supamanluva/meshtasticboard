@@ -255,6 +255,9 @@ function renderDevices(devices) {
                     <span class="badge badge-offline">Offline</span>
                 </div>
                 <div class="device-meta"><span>Error: <strong>${d.error || "unknown"}</strong></span></div>
+                <div class="device-actions">
+                    <button class="btn btn-sm btn-reconnect" onclick="reconnectDevice('${d.name}')">&#x21bb; Reconnect</button>
+                </div>
             </div>`;
         }
         const info = d.myInfo || {};
@@ -267,9 +270,14 @@ function renderDevices(devices) {
                 <span>Node#: <strong>${info.my_node_num || "?"}</strong></span>
                 <span>FW: <strong>${info.firmware_version || "?"}</strong></span>
                 <span>HW: <strong>${info.hw_model || "?"}</strong></span>
-                <span>Nodes: <strong>${info.num_online_nodes || "?"}</strong></span>
+                <span>Nodes: <strong>${info.num_online_nodes ?? "?"}</strong></span>
                 <span>Host: <strong>${d.host}:${d.port}</strong></span>
                 ${info.shortName ? `<span>Short: <strong>${info.shortName}</strong></span>` : ""}
+                ${info.reboot_count ? `<span>Reboots: <strong>${info.reboot_count}</strong></span>` : ""}
+            </div>
+            <div class="device-actions">
+                <button class="btn btn-sm btn-disconnect" onclick="disconnectDevice('${d.name}')">&#x2716; Disconnect</button>
+                <button class="btn btn-sm btn-reconnect" onclick="reconnectDevice('${d.name}')">&#x21bb; Reconnect</button>
             </div>
         </div>`;
     }).join("");
@@ -277,6 +285,45 @@ function renderDevices(devices) {
 
     // Render channels
     renderChannels(devices);
+}
+
+async function disconnectDevice(name) {
+    try {
+        const res = await fetch("/api/disconnect", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ device: name }),
+        });
+        const data = await res.json();
+        if (res.ok) {
+            showToast(`Disconnected from ${name}`, "info");
+            loadDevices();
+        } else {
+            showToast(`Disconnect failed: ${data.error}`, "error");
+        }
+    } catch (e) {
+        showToast(`Disconnect error: ${e.message}`, "error");
+    }
+}
+
+async function reconnectDevice(name) {
+    try {
+        showToast(`Reconnecting to ${name}…`, "info");
+        const res = await fetch("/api/reconnect", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ device: name }),
+        });
+        const data = await res.json();
+        if (res.ok && data.status === "connected") {
+            showToast(`Reconnected to ${name}`, "success");
+            loadDevices();
+        } else {
+            showToast(`Reconnect failed: ${data.error || data.status}`, "error");
+        }
+    } catch (e) {
+        showToast(`Reconnect error: ${e.message}`, "error");
+    }
 }
 
 function renderChannels(devices) {
@@ -1309,6 +1356,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // Auto-refresh
     setInterval(loadAll, REFRESH_INTERVAL);
+
+    // Expose device actions to global scope for onclick handlers
+    window.disconnectDevice = disconnectDevice;
+    window.reconnectDevice = reconnectDevice;
 });
 
 })();
