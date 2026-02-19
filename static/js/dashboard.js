@@ -15,6 +15,8 @@ let nodesData = [];
 let messagesData = [];
 let meshMap = null;
 let mapMarkers = {};
+let mapTrails = {};   // node_id -> L.polyline
+let trailsVisible = true;
 let trMap = null;
 let trMarkers = [];
 let topoSim = null;
@@ -299,7 +301,7 @@ async function disconnectDevice(name) {
         const data = await res.json();
         if (res.ok) {
             showToast(`Disconnected from ${name}`, "info");
-            loadDevices();
+            loadAll();
         } else {
             showToast(`Disconnect failed: ${data.error}`, "error");
         }
@@ -319,7 +321,7 @@ async function reconnectDevice(name) {
         const data = await res.json();
         if (res.ok && data.status === "connected") {
             showToast(`Reconnected to ${name}`, "success");
-            loadDevices();
+            loadAll();
         } else {
             showToast(`Reconnect failed: ${data.error || data.status}`, "error");
         }
@@ -495,9 +497,11 @@ function populateDeviceSelects(devices) {
 // ── Map ─────────────────────────────────────────────────────────────────
 
 function initMap() {
+    const center = window.MAP_CENTER || [63.9058, 19.7617];
+    const zoom = window.MAP_ZOOM || 13;
     meshMap = L.map("mesh-map", {
-        center: [63.9, 19.76],
-        zoom: 6,
+        center: center,
+        zoom: zoom,
         zoomControl: true,
     });
     const isDark = document.documentElement.getAttribute("data-theme") === "dark";
@@ -592,6 +596,68 @@ function updateMap(nodes) {
 
     if (bounds.length) {
         meshMap.fitBounds(bounds, { padding: [40, 40], maxZoom: 12 });
+    }
+
+    // Load and draw position trails
+    loadPositionTrails();
+}
+
+// Trail colors for different nodes
+const TRAIL_COLORS = ["#ff6b6b", "#ffd93d", "#6bcb77", "#4d96ff", "#ff922b", "#cc5de8", "#20c997", "#ff6348"];
+let trailColorIdx = 0;
+const nodeTrailColor = {};
+
+function getTrailColor(nodeId) {
+    if (!nodeTrailColor[nodeId]) {
+        nodeTrailColor[nodeId] = TRAIL_COLORS[trailColorIdx % TRAIL_COLORS.length];
+        trailColorIdx++;
+    }
+    return nodeTrailColor[nodeId];
+}
+
+async function loadPositionTrails() {
+    if (!meshMap || !trailsVisible) return;
+    try {
+        const data = await fetchJSON("/api/position-history");
+        // Remove old trails
+        Object.values(mapTrails).forEach(line => meshMap.removeLayer(line));
+        mapTrails = {};
+
+        for (const [nodeId, points] of Object.entries(data)) {
+            if (points.length < 2) continue;
+            const latlngs = points.map(p => [p.lat, p.lon]);
+            const color = getTrailColor(nodeId);
+            const trail = L.polyline(latlngs, {
+                color: color,
+                weight: 3,
+                opacity: 0.7,
+                dashArray: "6 4",
+            }).addTo(meshMap);
+            trail.bindTooltip(`Trail: ${nodeId} (${points.length} pts)`);
+            mapTrails[nodeId] = trail;
+        }
+    } catch (e) {
+        // silently ignore trail loading errors
+    }
+}
+
+function toggleTrails(visible) {
+    trailsVisible = visible;
+    Object.values(mapTrails).forEach(line => {
+        if (visible) line.addTo(meshMap);
+        else meshMap.removeLayer(line);
+    });
+    if (visible) loadPositionTrails();
+}
+
+async function clearTrails() {
+    try {
+        await postJSON("/api/position-history/clear", {});
+        Object.values(mapTrails).forEach(line => meshMap.removeLayer(line));
+        mapTrails = {};
+        showToast("Trail history cleared", "info");
+    } catch (e) {
+        showToast("Failed to clear trails: " + e.message, "error");
     }
 }
 
@@ -1249,14 +1315,8 @@ async function loadDeviceConfig() {
             document.getElementById("lora-info").innerHTML = '<span class="muted">Not available</span>';
         }
 
-        // Channels
-        if (config.channels && config.channels.length) {
-            document.getElementById("channel-info").innerHTML = config.channels.map(ch =>
-                `<div class="config-info-row"><span class="label">Ch ${ch.index}</span><span class="value">${ch.name || "(default)"} (${ch.role})</span></div>`
-            ).join("");
-        } else {
-            document.getElementById("channel-info").innerHTML = '<span class="muted">No channels</span>';
-        }
+        // Channels — load with full detail from channel API
+        loadChannelManager(device);
 
         // Position config
         if (config.position) {
@@ -1318,6 +1378,110 @@ async function removePosition() {
         showToast("Fixed position removed", "success");
     } catch (e) {
         showToast("Failed: " + e.message, "error");
+    }
+}
+
+// ── Channel Manager ─────────────────────────────────────────────────────
+
+async function loadChannelManager(device) {
+    const container = document.getElementById("channel-info");
+    if (!device) {
+        container.innerHTML = '<span class="muted">Select a device first</span>';
+        return;
+    }
+    try {
+        const channels = await fetchJSON(`/api/channels/${encodeURIComponent(device)}`);
+        if (!channels.length) {
+            container.innerHTML = '<span class="muted">No channels</span>';
+            return;
+        }
+        container.innerHTML = channels.map(ch => {
+            const roleName = ch.role.replace(/^\d+\s*/, "");  // clean enum prefix
+            const isActive = ch.role !== "0" && ch.role !== "DISABLED";
+            const pskDisplay = ch.psk ? (ch.psk.length > 10 ? ch.psk.substring(0, 10) + "…" : ch.psk) : "none";
+            const upDown = [];
+            if (ch.uplinkEnabled) upDown.push("↑UP");
+            if (ch.downlinkEnabled) upDown.push("↓DN");
+            const udStr = upDown.length ? ` [${upDown.join(" ")}]` : "";
+            return `<div class="config-info-row channel-row ${!isActive ? 'channel-disabled' : ''}">
+                <span class="label">Ch ${ch.index}</span>
+                <span class="value">${ch.name || "(default)"} <span class="muted">(${roleName})${udStr}</span></span>
+                <span class="channel-actions">
+                    <button class="btn btn-xs" onclick="editChannel('${device}', ${ch.index})" title="Edit">&#9998;</button>
+                    ${ch.index > 0 ? `<button class="btn btn-xs btn-danger" onclick="deleteChannel('${device}', ${ch.index})" title="Delete">&#10005;</button>` : ''}
+                </span>
+            </div>`;
+        }).join("");
+    } catch (e) {
+        container.innerHTML = `<span class="muted">Error: ${e.message}</span>`;
+    }
+}
+
+async function editChannel(device, index) {
+    try {
+        const channels = await fetchJSON(`/api/channels/${encodeURIComponent(device)}`);
+        const ch = channels.find(c => c.index === index);
+        if (!ch) { showToast("Channel not found", "error"); return; }
+
+        document.getElementById("channel-edit-form").style.display = "block";
+        document.getElementById("channel-edit-title").textContent = `Edit Channel ${index}`;
+        document.getElementById("ch-edit-index").value = index;
+        document.getElementById("ch-edit-name").value = ch.name || "";
+        document.getElementById("ch-edit-psk-mode").value = "keep";
+        document.getElementById("ch-edit-psk").style.display = "none";
+        document.getElementById("ch-edit-psk").value = "";
+        document.getElementById("ch-edit-uplink").checked = ch.uplinkEnabled || false;
+        document.getElementById("ch-edit-downlink").checked = ch.downlinkEnabled || false;
+
+        // PSK mode toggle
+        document.getElementById("ch-edit-psk-mode").onchange = function () {
+            document.getElementById("ch-edit-psk").style.display = this.value === "custom" ? "block" : "none";
+        };
+    } catch (e) {
+        showToast("Failed to load channel: " + e.message, "error");
+    }
+}
+
+async function saveChannel() {
+    const device = document.getElementById("config-device-select").value;
+    if (!device) { showToast("No device selected", "error"); return; }
+
+    const index = parseInt(document.getElementById("ch-edit-index").value);
+    const name = document.getElementById("ch-edit-name").value.trim();
+    const pskMode = document.getElementById("ch-edit-psk-mode").value;
+    const customPsk = document.getElementById("ch-edit-psk").value.trim();
+    const uplinkEnabled = document.getElementById("ch-edit-uplink").checked;
+    const downlinkEnabled = document.getElementById("ch-edit-downlink").checked;
+
+    let psk = pskMode;  // "keep", "default", "random"
+    if (pskMode === "custom") psk = customPsk;
+
+    try {
+        const res = await postJSON(`/api/channels/${encodeURIComponent(device)}/set`, {
+            index, name, psk, uplinkEnabled, downlinkEnabled,
+        });
+        if (res.error) throw new Error(res.error);
+        showToast(res.message || "Channel updated!", "success");
+        document.getElementById("channel-edit-form").style.display = "none";
+        loadChannelManager(device);
+    } catch (e) {
+        showToast("Failed to save channel: " + e.message, "error");
+    }
+}
+
+function cancelEditChannel() {
+    document.getElementById("channel-edit-form").style.display = "none";
+}
+
+async function deleteChannel(device, index) {
+    if (!confirm(`Delete channel ${index}? This will disable it on the device.`)) return;
+    try {
+        const res = await postJSON(`/api/channels/${encodeURIComponent(device)}/delete`, { index });
+        if (res.error) throw new Error(res.error);
+        showToast(res.message || "Channel deleted", "success");
+        loadChannelManager(device);
+    } catch (e) {
+        showToast("Failed to delete channel: " + e.message, "error");
     }
 }
 
@@ -1595,7 +1759,9 @@ function initMqttMap() {
         ? "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
         : "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
 
-    mqttMap = L.map("mqtt-map").setView([55.0, 15.0], 5);
+    const mqttCenter = window.MAP_CENTER || [63.9058, 19.7617];
+    const mqttZoom = window.MAP_ZOOM || 10;
+    mqttMap = L.map("mqtt-map").setView(mqttCenter, mqttZoom);
     L.tileLayer(tileUrl, {
         attribution: '&copy; OpenStreetMap contributors',
         maxZoom: 19,
@@ -1908,6 +2074,16 @@ document.addEventListener("DOMContentLoaded", () => {
     window.rebootDevice = rebootDevice;
     window.toggleMqttChannel = toggleMqttChannel;
     window.saveMqttDeviceConfig = saveMqttDeviceConfig;
+
+    // Trail controls
+    document.getElementById("trail-toggle")?.addEventListener("change", e => toggleTrails(e.target.checked));
+    document.getElementById("btn-clear-trails")?.addEventListener("click", clearTrails);
+
+    // Channel manager globals
+    window.editChannel = editChannel;
+    window.deleteChannel = deleteChannel;
+    window.saveChannel = saveChannel;
+    window.cancelEditChannel = cancelEditChannel;
 });
 
 })();

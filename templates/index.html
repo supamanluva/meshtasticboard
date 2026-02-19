@@ -139,7 +139,15 @@
         <div class="map-container">
             <div id="mesh-map"></div>
             <div class="map-legend">
-                <h3>Nodes on Map</h3>
+                <div class="map-legend-header">
+                    <h3>Nodes on Map</h3>
+                    <div class="map-controls">
+                        <label class="toggle-label" title="Show movement trails">
+                            <input type="checkbox" id="trail-toggle" checked> Trails
+                        </label>
+                        <button id="btn-clear-trails" class="btn btn-sm btn-danger" title="Clear trail history">Clear</button>
+                    </div>
+                </div>
                 <div id="map-node-list" class="map-node-list">
                     <p class="muted">No nodes with GPS position.</p>
                 </div>
@@ -361,6 +369,41 @@
                         <div class="config-section">
                             <h3>Channels</h3>
                             <div id="channel-info" class="config-info"></div>
+                            <div id="channel-edit-form" style="display:none" class="channel-edit-form">
+                                <h4 id="channel-edit-title">Edit Channel</h4>
+                                <div class="config-row">
+                                    <label>Index</label>
+                                    <input id="ch-edit-index" type="number" class="input" readonly>
+                                </div>
+                                <div class="config-row">
+                                    <label>Name</label>
+                                    <input id="ch-edit-name" type="text" class="input" placeholder="Channel name">
+                                </div>
+                                <div class="config-row">
+                                    <label>PSK</label>
+                                    <select id="ch-edit-psk-mode" class="input">
+                                        <option value="keep">Keep current</option>
+                                        <option value="default">Default key</option>
+                                        <option value="random">Generate random</option>
+                                        <option value="custom">Custom (base64)</option>
+                                    </select>
+                                    <input id="ch-edit-psk" type="text" class="input" placeholder="Base64 key" style="display:none;margin-top:6px">
+                                </div>
+                                <div class="config-row">
+                                    <label class="toggle-label">
+                                        <input id="ch-edit-uplink" type="checkbox"> Uplink enabled
+                                    </label>
+                                </div>
+                                <div class="config-row">
+                                    <label class="toggle-label">
+                                        <input id="ch-edit-downlink" type="checkbox"> Downlink enabled
+                                    </label>
+                                </div>
+                                <div class="config-row" style="gap:8px;display:flex">
+                                    <button class="btn btn-primary btn-sm" onclick="saveChannel()">Save Channel</button>
+                                    <button class="btn btn-sm" onclick="cancelEditChannel()">Cancel</button>
+                                </div>
+                            </div>
                         </div>
                         <div class="config-section">
                             <h3>Position Config</h3>
@@ -520,6 +563,10 @@
         <source src="data:audio/wav;base64,UklGRlQFAABXQVZFZm10IBAAAAABAAEAESsAABErAAABAAgAZGF0YTAFAACAf4B/f4GAgH9/gICAf3+AgH9/gICAgH9/f4CAgH9/gIB/f4CAgH+AgIB/f39/gICAgH9/f4CAgH+AkaCvuMDEyMrJx8S/uLClmI2EfXl4eXuAh46VnKOpsLW5u7y7ubazr6qloJyYlZOTlJWYm5+jpqmrra6urq2sqaeloZ6bmpiYmZqcnqGjpaeorK+ys7W3ubu8u7m3tbKvq6ejoJ2amJeXmJqdn6KlqKuusLKztLW1tLOyr6yppqOfnZuamp2foqWnqa2wsrS1tba2tbOxr62rqaelo6Gfn5+goqSlpqiqq62ur7CwsK+urKupp6alpKOioqKipKWmp6ipqqusra2trKuqqKalpKOioqKjpKWmp6mqq6ytra6urq2sq6qpqKalpKOjo6SlpqeoqaqrrK2trq6urq2sq6qpqKempaSlpaanqKmqq6ytra2urq6trKuqqainpqWlpaanqKmqq6ytra6urq6trKuqqainpqampqanqKmqq6ysra2traysq6qpqKenp6anqKipqqusrK2tra2srKuqqamoqKenp6iqqqusrK2tra2trKyrqqmpqainp6eoqKmqq6ysra2traysq6qpqKenpqanp6ipqqusrKytraysq6uqqamoqKeoqKmqq6usray=" type="audio/wav">
     </audio>
 
+    <script>
+        window.MAP_CENTER = {{ map_center | tojson }};
+        window.MAP_ZOOM = {{ map_zoom | tojson }};
+    </script>
     <script src="/static/js/dashboard.js"></script>
 </body>
 </html>

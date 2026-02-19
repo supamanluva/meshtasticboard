@@ -53,6 +53,10 @@ topology_edges = {}   # "from_id->to_id" -> { from, to, snr, rssi, lastSeen }
 traceroute_results = {}  # request_id -> { status, route, ... }
 traceroute_counter = 0
 
+# Position history: node_id -> list of { lat, lon, alt, timestamp }
+position_history = defaultdict(list)
+MAX_POSITION_HISTORY = 200  # max trail points per node
+
 # ── MQTT State ───────────────────────────────────────────────────────────────
 
 mqtt_client = None
@@ -136,6 +140,20 @@ def on_receive(packet, interface):
                     position = {k: v for k, v in position.items()} if hasattr(position, 'items') else {}
                 except Exception:
                     position = {}
+            # Store position history for trails
+            lat = position.get("latitude") or position.get("latitudeI", 0) / 1e7 if position.get("latitudeI") else position.get("latitude")
+            lon = position.get("longitude") or position.get("longitudeI", 0) / 1e7 if position.get("longitudeI") else position.get("longitude")
+            if lat and lon and abs(lat) > 0.001 and abs(lon) > 0.001:
+                trail_point = {
+                    "lat": lat,
+                    "lon": lon,
+                    "alt": position.get("altitude", 0),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                history = position_history[from_id]
+                history.append(trail_point)
+                if len(history) > MAX_POSITION_HISTORY:
+                    history.pop(0)
             try:
                 socketio.emit("position_update", {
                     "from": from_id,
@@ -361,7 +379,8 @@ def _device_watchdog():
             was_connected = dev.get("connected", False)
             if not was_connected:
                 # Device already known to be offline — try auto-reconnect
-                if WATCHDOG_AUTO_RECONNECT:
+                # But skip if user manually disconnected it
+                if WATCHDOG_AUTO_RECONNECT and not dev.get("manually_disconnected"):
                     _try_auto_reconnect(name, dev_cfg)
                 continue
 
@@ -933,7 +952,9 @@ def _device_summary(name, dev):
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    map_center = getattr(config, "MAP_CENTER", [63.9, 19.76])
+    map_zoom = getattr(config, "MAP_ZOOM", 10)
+    return render_template("index.html", map_center=map_center, map_zoom=map_zoom)
 
 
 @app.route("/api/devices")
@@ -1047,6 +1068,156 @@ def api_send():
         return jsonify({"error": str(e)}), 500
 
 
+# ── Position Trail API ───────────────────────────────────────────────────────
+
+@app.route("/api/position-history")
+def api_position_history():
+    """Return position trail history for all nodes."""
+    result = {}
+    for node_id, points in position_history.items():
+        if points:
+            result[node_id] = points
+    return jsonify(result)
+
+
+@app.route("/api/position-history/<node_id>")
+def api_position_history_node(node_id):
+    """Return position trail for a specific node."""
+    points = position_history.get(node_id, [])
+    return jsonify(points)
+
+
+@app.route("/api/position-history/clear", methods=["POST"])
+def api_clear_position_history():
+    """Clear all position history."""
+    position_history.clear()
+    return jsonify({"status": "cleared"})
+
+
+# ── Channel Manager API ─────────────────────────────────────────────────────
+
+@app.route("/api/channels/<device_name>")
+def api_get_channels(device_name):
+    """Get detailed channel info for a device."""
+    dev = devices.get(device_name)
+    if not dev or not dev.get("connected"):
+        return jsonify({"error": "device not connected"}), 400
+
+    iface = dev["interface"]
+    channels = []
+    try:
+        ln = iface.localNode
+        if ln and ln.channels:
+            for ch in ln.channels:
+                ch_data = {
+                    "index": ch.index,
+                    "role": str(ch.role),
+                    "name": ch.settings.name if ch.settings else "",
+                    "psk": base64.b64encode(ch.settings.psk).decode() if ch.settings and ch.settings.psk else "",
+                    "uplinkEnabled": ch.settings.uplink_enabled if ch.settings else False,
+                    "downlinkEnabled": ch.settings.downlink_enabled if ch.settings else False,
+                }
+                channels.append(ch_data)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify(channels)
+
+
+@app.route("/api/channels/<device_name>/set", methods=["POST"])
+def api_set_channel(device_name):
+    """Create or update a channel on a device.
+    
+    Body: { index, name, psk (base64 or 'random'), role, uplinkEnabled, downlinkEnabled }
+    """
+    dev = devices.get(device_name)
+    if not dev or not dev.get("connected"):
+        return jsonify({"error": "device not connected"}), 400
+
+    iface = dev["interface"]
+    data = request.json
+
+    ch_index = data.get("index", 0)
+    ch_name = data.get("name", "")
+    ch_psk = data.get("psk", "")
+    ch_uplink = data.get("uplinkEnabled", False)
+    ch_downlink = data.get("downlinkEnabled", False)
+
+    try:
+        ln = iface.localNode
+
+        if ch_index < 0 or ch_index >= len(ln.channels):
+            return jsonify({"error": f"Invalid channel index {ch_index}"}), 400
+
+        ch = ln.channels[ch_index]
+
+        # Update settings
+        if ch_name is not None:
+            ch.settings.name = ch_name
+        if ch_psk == "random":
+            import os as _os
+            ch.settings.psk = _os.urandom(32)
+        elif ch_psk == "default":
+            ch.settings.psk = base64.b64decode("1PG7OiApB1nwvP+rz05pAQ==")
+        elif ch_psk and ch_psk != "keep":
+            try:
+                ch.settings.psk = base64.b64decode(ch_psk)
+            except Exception:
+                return jsonify({"error": "Invalid PSK (must be base64)"}), 400
+        # If psk is empty or "keep", don't change it
+
+        ch.settings.uplink_enabled = bool(ch_uplink)
+        ch.settings.downlink_enabled = bool(ch_downlink)
+
+        # Write channel to device
+        ln.writeChannel(ch_index)
+        time.sleep(1)
+
+        return jsonify({
+            "status": "ok",
+            "message": f"Channel {ch_index} updated on {device_name}",
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/channels/<device_name>/delete", methods=["POST"])
+def api_delete_channel(device_name):
+    """Delete (disable) a secondary channel.
+    
+    Body: { index }  (cannot delete primary channel 0)
+    """
+    dev = devices.get(device_name)
+    if not dev or not dev.get("connected"):
+        return jsonify({"error": "device not connected"}), 400
+
+    iface = dev["interface"]
+    data = request.json
+    ch_index = data.get("index", -1)
+
+    if ch_index <= 0:
+        return jsonify({"error": "Cannot delete the primary channel (index 0)"}), 400
+
+    try:
+        ln = iface.localNode
+        if ch_index >= len(ln.channels):
+            return jsonify({"error": f"Channel {ch_index} does not exist"}), 400
+
+        ch = ln.channels[ch_index]
+        ch.role = 0  # DISABLED
+        ch.settings.name = ""
+        ch.settings.psk = b""
+        ch.settings.uplink_enabled = False
+        ch.settings.downlink_enabled = False
+        ln.writeChannel(ch_index)
+        time.sleep(1)
+
+        return jsonify({"status": "ok", "message": f"Channel {ch_index} disabled"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/reconnect", methods=["POST"])
 def api_reconnect():
     """Reconnect to a specific device."""
@@ -1055,11 +1226,13 @@ def api_reconnect():
     for dev_cfg in config.DEVICES:
         if dev_cfg["name"] == device_name:
             old = devices.get(device_name)
-            if old and old.get("interface"):
-                try:
-                    old["interface"].close()
-                except Exception:
-                    pass
+            if old:
+                old["manually_disconnected"] = False  # clear manual flag
+                if old.get("interface"):
+                    try:
+                        old["interface"].close()
+                    except Exception:
+                        pass
             success = connect_device(dev_cfg)
             return jsonify({"status": "connected" if success else "failed"})
     return jsonify({"error": "device not found in config"}), 404
@@ -1082,6 +1255,7 @@ def api_disconnect():
     dev["interface"] = None
     dev["connected"] = False
     dev["error"] = "manually disconnected"
+    dev["manually_disconnected"] = True
     socketio.emit("device_disconnected", {"device": device_name})
     return jsonify({"status": "disconnected", "device": device_name})
 

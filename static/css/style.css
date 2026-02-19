@@ -1148,3 +1148,57 @@ tbody tr:hover { background: var(--bg-hover); }
     .topo-info-panel { width: 100%; border-left: none; border-top: 1px solid var(--border); max-height: 200px; }
     #topology-graph { min-height: 350px; }
 }
+
+/* ── Button Extra Sizes ─────────────────────────────────────────────────── */
+
+.btn-xs {
+    padding: 2px 6px;
+    font-size: .7rem;
+    border-radius: 3px;
+    line-height: 1.2;
+    min-width: unset;
+}
+
+/* ── Channel Manager ────────────────────────────────────────────────────── */
+
+.channel-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.channel-row .value { flex: 1; }
+.channel-actions {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+}
+.channel-disabled { opacity: 0.45; }
+
+.channel-edit-form {
+    margin-top: 12px;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-tertiary);
+}
+.channel-edit-form h4 {
+    margin: 0 0 10px 0;
+    font-size: .9rem;
+    color: var(--accent);
+}
+
+/* ── Map Legend Header ──────────────────────────────────────────────────── */
+
+.map-legend-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+.map-legend-header h3 { margin: 0; }
+.map-controls {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}

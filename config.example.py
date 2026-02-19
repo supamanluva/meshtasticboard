@@ -29,6 +29,11 @@ TELEMETRY_INTERVAL = 30
 # Maximum number of messages to keep in memory
 MAX_MESSAGES = 500
 
+# Map default center (latitude, longitude) and zoom level
+# Set to your location so maps open where your devices are
+MAP_CENTER = [63.9058, 19.7617]   # e.g. your home coordinates
+MAP_ZOOM = 13                      # 1=world, 13=city, 18=street
+
 # ── MQTT Configuration ──────────────────────────────────────────────────
 # Broker your Meshtastic devices are publishing to
 MQTT_BROKER = os.environ.get("MQTT_BROKER", "mqtt.meshtastic.org")
