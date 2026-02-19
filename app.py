@@ -24,6 +24,7 @@ from flask_socketio import SocketIO
 import meshtastic
 import meshtastic.tcp_interface
 from pubsub import pub
+from google.protobuf.json_format import MessageToDict as _pb_to_dict
 
 import paho.mqtt.client as paho_mqtt
 from meshtastic.protobuf import mqtt_pb2, mesh_pb2, portnums_pb2
@@ -129,27 +130,28 @@ def on_receive(packet, interface):
         elif portnum == "POSITION_APP":
             position = decoded.get("position", {})
             if hasattr(position, 'DESCRIPTOR'):
-                from google.protobuf.json_format import MessageToDict
-                position = MessageToDict(position)
+                position = _pb_to_dict(position)
             elif not isinstance(position, dict):
                 try:
-                    position = dict(position)
+                    position = {k: v for k, v in position.items()} if hasattr(position, 'items') else {}
                 except Exception:
                     position = {}
-            socketio.emit("position_update", {
-                "from": from_id,
-                "position": position,
-            })
+            try:
+                socketio.emit("position_update", {
+                    "from": from_id,
+                    "position": position,
+                })
+            except (TypeError, ValueError):
+                pass  # skip unserializable position
 
         elif portnum == "TELEMETRY_APP":
             telemetry = decoded.get("telemetry", {})
             # Convert protobuf to dict if needed
             if hasattr(telemetry, 'DESCRIPTOR'):
-                from google.protobuf.json_format import MessageToDict
-                telemetry = MessageToDict(telemetry)
+                telemetry = _pb_to_dict(telemetry)
             elif not isinstance(telemetry, dict):
                 try:
-                    telemetry = dict(telemetry)
+                    telemetry = {k: v for k, v in telemetry.items()} if hasattr(telemetry, 'items') else {}
                 except Exception:
                     telemetry = {}
             _record_stats(from_id, packet, telemetry)
@@ -294,6 +296,7 @@ def connect_device(dev_cfg):
             "host": host,
             "port": port,
             "connected": True,
+            "connected_at": time.time(),
         }
         print(f"✓ {name} connected  (my node: {iface.myInfo})")
         # Collect initial stats snapshot for all known nodes
@@ -364,6 +367,11 @@ def _device_watchdog():
                 # Device already known to be offline — try auto-reconnect
                 if WATCHDOG_AUTO_RECONNECT:
                     _try_auto_reconnect(name, dev_cfg)
+                continue
+
+            # Skip health check if device connected recently (grace period)
+            connected_at = dev.get("connected_at", 0)
+            if time.time() - connected_at < 30:
                 continue
 
             # Device thinks it's connected — verify
