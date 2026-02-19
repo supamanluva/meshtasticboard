@@ -1848,6 +1848,17 @@ function initSocket() {
         badge.className = status.connected ? "badge badge-online" : "badge badge-offline";
     });
 
+    // Device connection watchdog events
+    socket.on("device_status_change", (data) => {
+        console.log("Device status change:", data);
+        // Refresh device cards immediately
+        loadAll();
+    });
+
+    socket.on("toast", (data) => {
+        showToast(data.message || "Notification", data.type || "info");
+    });
+
     socket.on("error", (data) => {
         showToast(data.message || "Error", "error");
     });

@@ -311,6 +311,114 @@ def connect_device(dev_cfg):
         return False
 
 
+# ── Device Health Watchdog ───────────────────────────────────────────────────
+
+WATCHDOG_INTERVAL = 15  # seconds between health checks
+WATCHDOG_AUTO_RECONNECT = True  # automatically try to reconnect lost devices
+_watchdog_thread = None
+
+
+def _check_device_health(name, dev):
+    """Check if a device's TCP connection is still alive.
+
+    Returns True if healthy, False if dead/lost.
+    """
+    iface = dev.get("interface")
+    if not iface or not dev.get("connected"):
+        return False
+    try:
+        # Check the underlying TCP stream — if the socket is closed or broken
+        # _readFromRadio / heartbeat will have set _rxThread to None
+        stream = getattr(iface, "stream", None)
+        if stream is None:
+            return False
+        # Check if the socket is still open
+        sock = getattr(stream, "_socket", None) or getattr(stream, "socket", None)
+        if sock is None:
+            # Try the interface-level socket
+            sock = getattr(iface, "_socket", None)
+        if sock and sock.fileno() == -1:
+            return False
+        # Check that the reader thread is still running
+        rx_thread = getattr(iface, "_rxThread", None)
+        if rx_thread is not None and not rx_thread.is_alive():
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def _device_watchdog():
+    """Background thread that monitors device connections and auto-reconnects."""
+    print("🔍 Device watchdog started")
+    while True:
+        time.sleep(WATCHDOG_INTERVAL)
+        for dev_cfg in config.DEVICES:
+            name = dev_cfg["name"]
+            dev = devices.get(name)
+            if not dev:
+                continue
+
+            was_connected = dev.get("connected", False)
+            if not was_connected:
+                # Device already known to be offline — try auto-reconnect
+                if WATCHDOG_AUTO_RECONNECT:
+                    _try_auto_reconnect(name, dev_cfg)
+                continue
+
+            # Device thinks it's connected — verify
+            if not _check_device_health(name, dev):
+                # Connection lost!
+                print(f"⚠ Watchdog: {name} connection lost!")
+                dev["connected"] = False
+                dev["error"] = "connection lost"
+                # Try to close the dead interface cleanly
+                try:
+                    iface = dev.get("interface")
+                    if iface:
+                        iface.close()
+                except Exception:
+                    pass
+                dev["interface"] = None
+
+                # Notify frontend immediately
+                socketio.emit("device_status_change", {
+                    "device": name,
+                    "connected": False,
+                    "reason": "connection lost",
+                })
+                socketio.emit("toast", {
+                    "message": f"⚠ Lost connection to {name}",
+                    "type": "warning",
+                })
+
+                # Auto-reconnect attempt
+                if WATCHDOG_AUTO_RECONNECT:
+                    _try_auto_reconnect(name, dev_cfg)
+
+
+def _try_auto_reconnect(name, dev_cfg):
+    """Attempt to reconnect a device."""
+    try:
+        print(f"↻ Watchdog: attempting reconnect to {name} …")
+        success = connect_device(dev_cfg)
+        if success:
+            print(f"✓ Watchdog: {name} reconnected!")
+            socketio.emit("device_status_change", {
+                "device": name,
+                "connected": True,
+                "reason": "auto-reconnected",
+            })
+            socketio.emit("toast", {
+                "message": f"✓ {name} reconnected automatically",
+                "type": "success",
+            })
+        else:
+            print(f"✗ Watchdog: {name} reconnect failed")
+    except Exception as e:
+        print(f"✗ Watchdog: {name} reconnect error: {e}")
+
+
 def _collect_initial_stats(dev_name, iface):
     """Grab initial device metrics from all known nodes."""
     try:
@@ -1453,6 +1561,9 @@ if __name__ == "__main__":
     print("=" * 60)
     connect_all()
     mqtt_connect()
+    # Start device health watchdog
+    _watchdog_thread = threading.Thread(target=_device_watchdog, daemon=True)
+    _watchdog_thread.start()
     try:
         socketio.run(
             app,
