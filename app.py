@@ -316,9 +316,11 @@ def connect_device(dev_cfg):
 
 # ── Device Health Watchdog ───────────────────────────────────────────────────
 
-WATCHDOG_INTERVAL = 15  # seconds between health checks
+WATCHDOG_INTERVAL = 60  # seconds between health checks
 WATCHDOG_AUTO_RECONNECT = True  # automatically try to reconnect lost devices
+WATCHDOG_FAIL_THRESHOLD = 3  # consecutive failures before marking device dead
 _watchdog_thread = None
+_watchdog_fail_counts = {}  # name -> consecutive fail count
 
 
 def _check_device_health(name, dev):
@@ -330,21 +332,15 @@ def _check_device_health(name, dev):
     if not iface or not dev.get("connected"):
         return False
     try:
-        # Check the underlying TCP stream — if the socket is closed or broken
-        # _readFromRadio / heartbeat will have set _rxThread to None
+        # Check the underlying TCP stream
         stream = getattr(iface, "stream", None)
         if stream is None:
             return False
         # Check if the socket is still open
         sock = getattr(stream, "_socket", None) or getattr(stream, "socket", None)
         if sock is None:
-            # Try the interface-level socket
             sock = getattr(iface, "_socket", None)
         if sock and sock.fileno() == -1:
-            return False
-        # Check that the reader thread is still running
-        rx_thread = getattr(iface, "_rxThread", None)
-        if rx_thread is not None and not rx_thread.is_alive():
             return False
         return True
     except Exception:
@@ -353,7 +349,7 @@ def _check_device_health(name, dev):
 
 def _device_watchdog():
     """Background thread that monitors device connections and auto-reconnects."""
-    print("🔍 Device watchdog started")
+    print("🔍 Device watchdog started (interval={WATCHDOG_INTERVAL}s, threshold={WATCHDOG_FAIL_THRESHOLD})")
     while True:
         time.sleep(WATCHDOG_INTERVAL)
         for dev_cfg in config.DEVICES:
@@ -371,16 +367,23 @@ def _device_watchdog():
 
             # Skip health check if device connected recently (grace period)
             connected_at = dev.get("connected_at", 0)
-            if time.time() - connected_at < 30:
+            if time.time() - connected_at < 90:
                 continue
 
             # Device thinks it's connected — verify
             if not _check_device_health(name, dev):
-                # Connection lost!
-                print(f"⚠ Watchdog: {name} connection lost!")
+                _watchdog_fail_counts[name] = _watchdog_fail_counts.get(name, 0) + 1
+                count = _watchdog_fail_counts[name]
+                print(f"⚠ Watchdog: {name} health check failed ({count}/{WATCHDOG_FAIL_THRESHOLD})")
+
+                if count < WATCHDOG_FAIL_THRESHOLD:
+                    continue  # not enough failures yet, wait and recheck
+
+                # Confirmed dead after multiple consecutive failures
+                _watchdog_fail_counts[name] = 0
+                print(f"⚠ Watchdog: {name} connection lost (confirmed after {WATCHDOG_FAIL_THRESHOLD} checks)")
                 dev["connected"] = False
                 dev["error"] = "connection lost"
-                # Try to close the dead interface cleanly
                 try:
                     iface = dev.get("interface")
                     if iface:
@@ -389,7 +392,6 @@ def _device_watchdog():
                     pass
                 dev["interface"] = None
 
-                # Notify frontend immediately
                 socketio.emit("device_status_change", {
                     "device": name,
                     "connected": False,
@@ -400,9 +402,11 @@ def _device_watchdog():
                     "type": "warning",
                 })
 
-                # Auto-reconnect attempt
                 if WATCHDOG_AUTO_RECONNECT:
                     _try_auto_reconnect(name, dev_cfg)
+            else:
+                # Healthy — reset fail counter
+                _watchdog_fail_counts[name] = 0
 
 
 def _try_auto_reconnect(name, dev_cfg):
