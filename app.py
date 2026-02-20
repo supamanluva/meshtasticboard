@@ -182,6 +182,7 @@ def on_receive(packet, interface):
                 pass  # skip unserializable telemetry
 
         elif portnum == "TRACEROUTE_APP":
+            print(f"  ⚡ TRACEROUTE_APP packet received from={from_id} to={to_id}")
             _handle_traceroute_response(packet, interface)
 
         elif portnum == "NEIGHBORINFO_APP":
@@ -263,22 +264,54 @@ def _handle_traceroute_response(packet, interface):
     decoded = packet.get("decoded", {})
     from_id = packet.get("fromId", "")
 
+    print(f"  → _handle_traceroute_response: from_id={from_id}")
+    print(f"    Pending traceroutes: {[(rid, tr.get('destination'), tr.get('status')) for rid, tr in traceroute_results.items()]}")
+    print(f"    Decoded keys: {list(decoded.keys())}")
+
     # Find matching traceroute request
     for req_id, tr in traceroute_results.items():
         if tr.get("status") == "pending" and tr.get("destination") == from_id:
-            route_raw = decoded.get("traceroute", decoded)
+            print(f"    ✓ Matched traceroute {req_id}")
             route_nodes = []
-            if isinstance(route_raw, dict):
-                for node_num in route_raw.get("route", []):
-                    route_nodes.append(f"!{node_num:08x}")
-                for node_num in route_raw.get("routeBack", []):
-                    route_nodes.append(f"!{node_num:08x}")
+            snr_towards = []
+            snr_back = []
+
+            # Parse the RouteDiscovery protobuf from raw payload
+            payload = decoded.get("payload")
+            if payload:
+                try:
+                    rd = mesh_pb2.RouteDiscovery()
+                    if isinstance(payload, bytes):
+                        rd.ParseFromString(payload)
+                    elif isinstance(payload, str):
+                        rd.ParseFromString(base64.b64decode(payload))
+                    rd_dict = _pb_to_dict(rd)
+                    for node_num in rd_dict.get("route", []):
+                        route_nodes.append(f"!{node_num:08x}")
+                    for node_num in rd_dict.get("routeBack", []):
+                        route_nodes.append(f"!{node_num:08x}")
+                    snr_towards = [s / 4 for s in rd_dict.get("snrTowards", [])]
+                    snr_back = [s / 4 for s in rd_dict.get("snrBack", [])]
+                except Exception as e:
+                    print(f"  ⚠ Failed to parse traceroute payload: {e}")
+
+            # Fallback: try decoded dict directly (older library versions)
+            if not route_nodes:
+                route_raw = decoded.get("traceroute", decoded)
+                if isinstance(route_raw, dict):
+                    for node_num in route_raw.get("route", []):
+                        route_nodes.append(f"!{node_num:08x}")
+                    for node_num in route_raw.get("routeBack", []):
+                        route_nodes.append(f"!{node_num:08x}")
 
             tr["status"] = "complete"
             tr["route"] = route_nodes
+            tr["snrTowards"] = snr_towards
+            tr["snrBack"] = snr_back
             tr["completedAt"] = datetime.now(timezone.utc).isoformat()
             tr["snr"] = packet.get("rxSnr")
             socketio.emit("traceroute_result", tr)
+            print(f"  ✓ Traceroute {req_id} complete: {len(route_nodes)} hops")
             break
 
 
@@ -1531,8 +1564,35 @@ def api_traceroute():
         "route": [],
     }
 
+    def _run_traceroute(iface, dest, req_id):
+        """Run traceroute in background thread (sendTraceRoute blocks)."""
+        print(f"  → Traceroute thread started: {req_id} dest={dest}")
+        try:
+            iface.sendTraceRoute(dest=dest, hopLimit=7)
+            print(f"  → Traceroute {req_id} sendTraceRoute returned OK")
+            # If sendTraceRoute returned without error, the library got a response.
+            # Check if on_receive already updated the status via _handle_traceroute_response
+            tr = traceroute_results.get(req_id)
+            if tr and tr["status"] == "pending":
+                print(f"  ⚠ Traceroute {req_id}: sendTraceRoute succeeded but on_receive didn't update status")
+                tr["status"] = "complete"
+                tr["completedAt"] = datetime.now(timezone.utc).isoformat()
+                socketio.emit("traceroute_result", tr)
+        except Exception as e:
+            print(f"  ⚠ Traceroute {req_id} error: {e}")
+            tr = traceroute_results.get(req_id)
+            if tr and tr["status"] == "pending":
+                tr["status"] = "error"
+                tr["error"] = str(e)
+                socketio.emit("traceroute_result", tr)
+
     try:
-        iface.sendTraceRoute(dest=destination, hopLimit=7)
+        t = threading.Thread(
+            target=_run_traceroute,
+            args=(iface, destination, req_id),
+            daemon=True,
+        )
+        t.start()
         return jsonify({"id": req_id, "status": "pending"})
     except Exception as e:
         traceroute_results[req_id]["status"] = "error"

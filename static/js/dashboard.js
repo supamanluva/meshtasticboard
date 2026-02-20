@@ -137,7 +137,15 @@ function initTabs() {
 
             // Lazy init
             if (tabId === "tab-map" && meshMap) {
-                setTimeout(() => meshMap.invalidateSize(), 100);
+                setTimeout(() => {
+                    meshMap.invalidateSize();
+                    // Auto-fit to device positions instead of static center
+                    const withPos = nodesData.filter(n => n.latitude != null && n.longitude != null);
+                    if (withPos.length) {
+                        const bounds = withPos.map(n => [n.latitude, n.longitude]);
+                        meshMap.fitBounds(bounds, { padding: [40, 40], maxZoom: 14 });
+                    }
+                }, 100);
             }
             if (tabId === "tab-topology") {
                 loadTopology();
