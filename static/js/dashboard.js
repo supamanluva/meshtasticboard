@@ -251,13 +251,21 @@ function updateConnectionStatus(devices) {
 function renderDevices(devices) {
     const container = document.getElementById("devices-container");
     if (!devices.length) {
-        container.innerHTML = '<p class="muted">No devices configured.</p>';
+        container.innerHTML = '<p class="muted">No devices configured. Click <strong>+ Add Device</strong> to get started.</p>';
         return;
     }
     const html = devices.map(d => {
         const displayName = d.deviceName || d.name;
         const subtitle = d.deviceName && d.deviceName !== d.name
             ? `<span class="device-card-subtitle">(config: ${d.name})</span>` : "";
+        const eName = escapeHtml(d.name);
+        const eHost = escapeHtml(d.host || "");
+        const ePort = d.port || 4403;
+        const eType = d.type || "tcp";
+        const eBle = escapeHtml(d.ble_address || "");
+        const mgmtBtns = `
+            <button class="btn btn-sm btn-edit" onclick="openEditDevice('${eName}','${eHost}',${ePort},'${eType}','${eBle}')" title="Edit">&#x270E; Edit</button>
+            <button class="btn btn-sm btn-remove" onclick="removeDevice('${eName}')" title="Remove">&#x2716; Remove</button>`;
         if (!d.connected) {
             return `<div class="device-card">
                 <div class="device-card-header">
@@ -268,6 +276,7 @@ function renderDevices(devices) {
                 <div class="device-actions">
                     <button class="btn btn-sm btn-reconnect" onclick="reconnectDevice('${d.name}')">&#x21bb; Reconnect</button>
                     <button class="btn btn-sm btn-reboot" onclick="rebootDevice('${d.name}')">&#x26A1; Reboot</button>
+                    ${mgmtBtns}
                 </div>
             </div>`;
         }
@@ -282,7 +291,7 @@ function renderDevices(devices) {
                 <span>FW: <strong>${info.firmware_version || "?"}</strong></span>
                 <span>HW: <strong>${info.hw_model || "?"}</strong></span>
                 <span>Nodes: <strong>${info.num_online_nodes ?? "?"}</strong></span>
-                <span>Host: <strong>${d.host}:${d.port}</strong></span>
+                <span>${eType === "ble" ? `BLE: <strong>${eBle || "scan"}</strong>` : `Host: <strong>${d.host}:${d.port}</strong>`}</span>
                 ${info.shortName ? `<span>Short: <strong>${info.shortName}</strong></span>` : ""}
                 ${info.reboot_count ? `<span>Reboots: <strong>${info.reboot_count}</strong></span>` : ""}
             </div>
@@ -290,6 +299,7 @@ function renderDevices(devices) {
                 <button class="btn btn-sm btn-disconnect" onclick="disconnectDevice('${d.name}')">&#x2716; Disconnect</button>
                 <button class="btn btn-sm btn-reconnect" onclick="reconnectDevice('${d.name}')">&#x21bb; Reconnect</button>
                 <button class="btn btn-sm btn-reboot" onclick="rebootDevice('${d.name}')">&#x26A1; Reboot</button>
+                ${mgmtBtns}
             </div>
         </div>`;
     }).join("");
@@ -358,6 +368,148 @@ async function rebootDevice(name) {
         }
     } catch (e) {
         showToast(`Reboot error: ${e.message}`, "error");
+    }
+}
+
+// ── Device Management (Add / Edit / Remove) ────────────────────────────
+
+function openAddDevice() {
+    document.getElementById("device-modal-title").textContent = "Add Device";
+    document.getElementById("dm-submit").textContent = "Add Device";
+    document.getElementById("dm-old-name").value = "";
+    document.getElementById("dm-name").value = "";
+    document.getElementById("dm-type").value = "tcp";
+    document.getElementById("dm-host").value = "";
+    document.getElementById("dm-port").value = "4403";
+    document.getElementById("dm-ble-address").value = "";
+    document.getElementById("dm-ble-scan-results").style.display = "none";
+    toggleDeviceTypeFields();
+    document.getElementById("device-modal").style.display = "flex";
+}
+
+function openEditDevice(name, host, port, type, bleAddress) {
+    document.getElementById("device-modal-title").textContent = "Edit Device";
+    document.getElementById("dm-submit").textContent = "Save Changes";
+    document.getElementById("dm-old-name").value = name;
+    document.getElementById("dm-name").value = name;
+    document.getElementById("dm-type").value = type || "tcp";
+    document.getElementById("dm-host").value = host || "";
+    document.getElementById("dm-port").value = port || 4403;
+    document.getElementById("dm-ble-address").value = bleAddress || "";
+    document.getElementById("dm-ble-scan-results").style.display = "none";
+    toggleDeviceTypeFields();
+    document.getElementById("device-modal").style.display = "flex";
+}
+
+function toggleDeviceTypeFields() {
+    const type = document.getElementById("dm-type").value;
+    document.getElementById("dm-tcp-fields").style.display = type === "tcp" ? "" : "none";
+    document.getElementById("dm-ble-fields").style.display = type === "ble" ? "" : "none";
+}
+
+async function scanBLE() {
+    const btn = document.getElementById("dm-ble-scan-btn");
+    const resultsDiv = document.getElementById("dm-ble-scan-results");
+    btn.disabled = true;
+    btn.textContent = "Scanning…";
+    resultsDiv.style.display = "block";
+    resultsDiv.innerHTML = '<p class="muted">Scanning for Meshtastic BLE devices (~8s)…</p>';
+    try {
+        const res = await postJSON("/api/ble/scan", {});
+        if (res.error) throw new Error(res.error);
+        if (!res.devices || !res.devices.length) {
+            resultsDiv.innerHTML = '<p class="muted">No Meshtastic BLE devices found nearby.</p>';
+        } else {
+            resultsDiv.innerHTML = res.devices.map(d => {
+                const rssi = d.rssi != null ? ` <small style="opacity:.6">${d.rssi} dBm</small>` : '';
+                const addr = escapeHtml(d.address);
+                return `<div class="ble-scan-item" style="display:flex;align-items:center;gap:8px;padding:4px 6px;border-radius:4px;margin:2px 0">
+                    <span style="flex:1;cursor:pointer" onclick="document.getElementById('dm-ble-address').value='${addr}';document.getElementById('dm-ble-scan-results').style.display='none'">
+                        <strong>${escapeHtml(d.name)}</strong> <span style="color:var(--green);font-size:.75em">&#x2713; Meshtastic</span>${rssi}
+                        <small style="opacity:.7">${addr}</small>
+                    </span>
+                    <button class="btn btn-sm btn-secondary" onclick="pairBLE('${addr}')" style="white-space:nowrap">Pair</button>
+                </div>`;
+            }).join("");
+        }
+    } catch (err) {
+        resultsDiv.innerHTML = `<p class="muted" style="color:var(--danger)">Scan failed: ${escapeHtml(err.message)}</p>`;
+    } finally {
+        btn.disabled = false;
+        btn.textContent = "Scan";
+    }
+}
+
+async function pairBLE(address) {
+    const pin = prompt("Enter BLE pairing PIN (leave empty if none):", "123456");
+    if (pin === null) return; // cancelled
+    showToast(`Pairing with ${address}… this takes ~20s`, "info");
+    try {
+        const res = await postJSON("/api/ble/pair", { address, pin });
+        if (res.error) throw new Error(res.error);
+        if (res.paired) {
+            showToast(`Paired with ${address} successfully!`, "success");
+            // Auto-fill the address
+            document.getElementById("dm-ble-address").value = address;
+        } else {
+            showToast(`Pairing result: paired=${res.paired}, trusted=${res.trusted}. Check server logs.`, "warning");
+        }
+        console.log("BLE pair log:", res.log);
+    } catch (err) {
+        showToast(`Pair failed: ${err.message}`, "error");
+    }
+}
+
+function closeDeviceModal() {
+    document.getElementById("device-modal").style.display = "none";
+}
+
+function initDeviceManagement() {
+    document.getElementById("btn-add-device")?.addEventListener("click", openAddDevice);
+
+    // Close modal on overlay click
+    document.getElementById("device-modal")?.addEventListener("click", (e) => {
+        if (e.target.classList.contains("modal-overlay")) closeDeviceModal();
+    });
+
+    document.getElementById("device-modal-form")?.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const oldName = document.getElementById("dm-old-name").value;
+        const name = document.getElementById("dm-name").value.trim();
+        const type = document.getElementById("dm-type").value;
+        const host = document.getElementById("dm-host").value.trim();
+        const port = parseInt(document.getElementById("dm-port").value) || 4403;
+        const ble_address = document.getElementById("dm-ble-address").value.trim();
+
+        if (!name) { showToast("Name is required", "error"); return; }
+        if (type === "tcp" && !host) { showToast("Host / IP is required for TCP", "error"); return; }
+
+        try {
+            let res;
+            if (oldName) {
+                res = await postJSON("/api/devices/edit", { oldName, name, type, host, port, ble_address });
+            } else {
+                res = await postJSON("/api/devices/add", { name, type, host, port, ble_address });
+            }
+            if (res.error) throw new Error(res.error);
+            closeDeviceModal();
+            showToast(oldName ? `Device updated: ${name}` : `Device added: ${name}`, "success");
+            loadAll();
+        } catch (err) {
+            showToast(`Failed: ${err.message}`, "error");
+        }
+    });
+}
+
+async function removeDevice(name) {
+    if (!confirm(`Remove device "${name}"? This will disconnect and remove it from config.`)) return;
+    try {
+        const res = await postJSON("/api/devices/remove", { name });
+        if (res.error) throw new Error(res.error);
+        showToast(`Device removed: ${name}`, "success");
+        loadAll();
+    } catch (e) {
+        showToast(`Remove failed: ${e.message}`, "error");
     }
 }
 
@@ -671,29 +823,60 @@ async function clearTrails() {
 
 // ── Messages ────────────────────────────────────────────────────────────
 
+let msgFilter = "all"; // "all" | "broadcast" | "dm"
+
+function isBroadcast(msg) {
+    return msg.to === "^all" || msg.to === "!ffffffff" || msg.to === "all" || msg.to === "^all";
+}
+
 function renderMessages(msgs) {
     const list = document.getElementById("messages-list");
-    document.getElementById("msg-count").textContent = msgs.length;
-    document.getElementById("msg-count-header").textContent = msgs.length;
+    const total = msgs.length;
+    const broadcasts = msgs.filter(m => isBroadcast(m));
+    const dms = msgs.filter(m => !isBroadcast(m));
 
-    if (!msgs.length) {
-        list.innerHTML = '<p class="muted">No messages yet.</p>';
+    document.getElementById("msg-count").textContent = total;
+    document.getElementById("msg-count-header").textContent = total;
+    document.getElementById("msg-broadcast-count").textContent = broadcasts.length;
+    document.getElementById("msg-dm-count").textContent = dms.length;
+
+    // Apply filter
+    let filtered = msgs;
+    if (msgFilter === "broadcast") filtered = broadcasts;
+    else if (msgFilter === "dm") filtered = dms;
+
+    if (!filtered.length) {
+        const label = msgFilter === "dm" ? "direct messages" : msgFilter === "broadcast" ? "broadcast messages" : "messages";
+        list.innerHTML = `<p class="muted">No ${label} yet.</p>`;
         return;
     }
 
-    list.innerHTML = msgs.map(m => {
+    list.innerHTML = filtered.map(m => {
         const isSent = m.sent || m.from === "local";
         const cls = isSent ? "msg-out" : "msg-in";
+        const isDm = !isBroadcast(m);
         const ts = m.timestamp ? new Date(m.timestamp).toLocaleTimeString() : "";
         const fromLabel = isSent ? `You (${m.device})` : resolveNodeName(m.from);
-        const toLabel = m.to === "^all" ? "broadcast" : resolveNodeName(m.to);
-        return `<div class="msg-bubble ${cls}">
-            <div>${escapeHtml(m.text)}</div>
+        const toLabel = isBroadcast(m) ? "broadcast" : resolveNodeName(m.to);
+        const dmTag = isDm ? '<span class="msg-dm-tag">DM</span>' : '';
+        return `<div class="msg-bubble ${cls}${isDm ? " msg-dm" : ""}">
+            <div>${dmTag}${escapeHtml(m.text)}</div>
             <div class="msg-meta">${fromLabel} → ${toLabel} · ${ts}${m.rxSnr ? ` · SNR: ${m.rxSnr}` : ""}</div>
         </div>`;
     }).join("");
 
     list.scrollTop = list.scrollHeight;
+}
+
+function initMsgSubtabs() {
+    document.querySelectorAll(".msg-subtab").forEach(btn => {
+        btn.addEventListener("click", () => {
+            document.querySelectorAll(".msg-subtab").forEach(b => b.classList.remove("active"));
+            btn.classList.add("active");
+            msgFilter = btn.dataset.filter;
+            renderMessages(messagesData);
+        });
+    });
 }
 
 function appendMessage(msg) {
@@ -2046,12 +2229,14 @@ document.addEventListener("DOMContentLoaded", () => {
     initTabs();
     initMap();
     initSendForm();
+    initMsgSubtabs();
     initNodeSearch();
     initTraceroute();
     initTopologyControls();
     initStatsNodeSelect();
     initConfig();
     initMqtt();
+    initDeviceManagement();
     initSocket();
 
     // Initial load
@@ -2092,6 +2277,18 @@ document.addEventListener("DOMContentLoaded", () => {
     window.deleteChannel = deleteChannel;
     window.saveChannel = saveChannel;
     window.cancelEditChannel = cancelEditChannel;
+
+    // Device management globals
+    window.disconnectDevice = disconnectDevice;
+    window.reconnectDevice = reconnectDevice;
+    window.rebootDevice = rebootDevice;
+    window.openEditDevice = openEditDevice;
+    window.openAddDevice = openAddDevice;
+    window.closeDeviceModal = closeDeviceModal;
+    window.removeDevice = removeDevice;
+    window.toggleDeviceTypeFields = toggleDeviceTypeFields;
+    window.scanBLE = scanBLE;
+    window.pairBLE = pairBLE;
 });
 
 })();

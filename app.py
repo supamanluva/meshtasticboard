@@ -23,6 +23,11 @@ from flask_socketio import SocketIO
 
 import meshtastic
 import meshtastic.tcp_interface
+try:
+    import meshtastic.ble_interface
+    BLE_AVAILABLE = True
+except ImportError:
+    BLE_AVAILABLE = False
 from pubsub import pub
 from google.protobuf.json_format import MessageToDict as _pb_to_dict
 
@@ -330,35 +335,51 @@ def _device_name_for(interface):
 
 
 def connect_device(dev_cfg):
-    """Connect to a single Meshtastic device."""
+    """Connect to a single Meshtastic device (TCP or BLE)."""
     name = dev_cfg["name"]
-    host = dev_cfg["host"]
+    conn_type = dev_cfg.get("type", "tcp")
+    host = dev_cfg.get("host", "")
     port = dev_cfg.get("port", 4403)
+    ble_address = dev_cfg.get("ble_address", "")
 
-    print(f"→ Connecting to {name} at {host}:{port} …")
     try:
-        iface = meshtastic.tcp_interface.TCPInterface(
-            hostname=host,
-            portNumber=port,
-            noProto=False,
-        )
+        if conn_type == "ble":
+            if not BLE_AVAILABLE:
+                raise RuntimeError("BLE not available (meshtastic.ble_interface not installed)")
+            addr = ble_address or None
+            print(f"→ Connecting to {name} via BLE ({addr or 'scan'}) …")
+            iface = meshtastic.ble_interface.BLEInterface(
+                address=addr,
+                noProto=False,
+            )
+        else:
+            print(f"→ Connecting to {name} at {host}:{port} …")
+            iface = meshtastic.tcp_interface.TCPInterface(
+                hostname=host,
+                portNumber=port,
+                noProto=False,
+            )
+
         devices[name] = {
             "interface": iface,
+            "type": conn_type,
             "host": host,
             "port": port,
+            "ble_address": ble_address,
             "connected": True,
             "connected_at": time.time(),
         }
         print(f"✓ {name} connected  (my node: {iface.myInfo})")
-        # Collect initial stats snapshot for all known nodes
         _collect_initial_stats(name, iface)
         return True
     except Exception as e:
         print(f"✗ Failed to connect to {name}: {e}")
         devices[name] = {
             "interface": None,
+            "type": conn_type,
             "host": host,
             "port": port,
+            "ble_address": ble_address,
             "connected": False,
             "error": str(e),
         }
@@ -375,7 +396,7 @@ _watchdog_fail_counts = {}  # name -> consecutive fail count
 
 
 def _check_device_health(name, dev):
-    """Check if a device's TCP connection is still alive.
+    """Check if a device connection is still alive.
 
     Returns True if healthy, False if dead/lost.
     """
@@ -383,17 +404,29 @@ def _check_device_health(name, dev):
     if not iface or not dev.get("connected"):
         return False
     try:
-        # Check the underlying TCP stream
-        stream = getattr(iface, "stream", None)
-        if stream is None:
-            return False
-        # Check if the socket is still open
-        sock = getattr(stream, "_socket", None) or getattr(stream, "socket", None)
-        if sock is None:
-            sock = getattr(iface, "_socket", None)
-        if sock and sock.fileno() == -1:
-            return False
-        return True
+        conn_type = dev.get("type", "tcp")
+
+        if conn_type == "ble":
+            # For BLE: check if the BLEClient is still connected
+            client = getattr(iface, "client", None)
+            if client is None:
+                return False
+            bleak = getattr(client, "bleak_client", None)
+            if bleak and hasattr(bleak, "is_connected"):
+                return bleak.is_connected
+            # Fallback: if we can access nodes, it's alive
+            return iface.nodes is not None
+        else:
+            # TCP: Check the underlying TCP stream
+            stream = getattr(iface, "stream", None)
+            if stream is None:
+                return False
+            sock = getattr(stream, "_socket", None) or getattr(stream, "socket", None)
+            if sock is None:
+                sock = getattr(iface, "_socket", None)
+            if sock and sock.fileno() == -1:
+                return False
+            return True
     except Exception:
         return False
 
@@ -911,8 +944,10 @@ def _device_summary(name, dev):
     if not iface or not dev.get("connected"):
         return {
             "name": name,
+            "type": dev.get("type", "tcp"),
             "host": dev.get("host"),
             "port": dev.get("port"),
+            "ble_address": dev.get("ble_address", ""),
             "connected": False,
             "error": dev.get("error", "not connected"),
         }
@@ -972,8 +1007,10 @@ def _device_summary(name, dev):
     return {
         "name": name,
         "deviceName": device_long_name or name,
+        "type": dev.get("type", "tcp"),
         "host": dev.get("host"),
         "port": dev.get("port"),
+        "ble_address": dev.get("ble_address", ""),
         "connected": True,
         "myInfo": my_info,
         "nodes": nodes,
@@ -1310,6 +1347,291 @@ def api_reboot():
         return jsonify({"status": "rebooting", "device": device_name, "secs": secs})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# ── Device Management (Add / Edit / Remove) ─────────────────────────────────
+
+def _save_devices_to_config():
+    """Persist the current DEVICES list back to config.py."""
+    import re
+    config_path = os.path.join(os.path.dirname(__file__), "config.py")
+    with open(config_path, "r") as f:
+        content = f.read()
+    # Build the new DEVICES block
+    lines = ["DEVICES = ["]
+    for d in config.DEVICES:
+        conn_type = d.get("type", "tcp")
+        if conn_type == "ble":
+            lines.append(f'    {{"name": "{d["name"]}", "type": "ble", "ble_address": "{d.get("ble_address", "")}"}},')
+        else:
+            lines.append(f'    {{"name": "{d["name"]}", "host": "{d.get("host", "")}", "port": {d.get("port", 4403)}}},')
+    lines.append("]")
+    new_block = "\n".join(lines)
+    # Replace the existing DEVICES block
+    pattern = r"DEVICES\s*=\s*\[.*?\]"
+    content = re.sub(pattern, new_block, content, count=1, flags=re.DOTALL)
+    with open(config_path, "w") as f:
+        f.write(content)
+
+
+@app.route("/api/devices/add", methods=["POST"])
+def api_device_add():
+    """Add a new device and connect to it."""
+    data = request.json
+    name = data.get("name", "").strip()
+    conn_type = data.get("type", "tcp").strip()
+    host = data.get("host", "").strip()
+    port = int(data.get("port", 4403))
+    ble_address = data.get("ble_address", "").strip()
+
+    if not name:
+        return jsonify({"error": "name is required"}), 400
+    if conn_type == "tcp" and not host:
+        return jsonify({"error": "host (IP) is required for TCP devices"}), 400
+    if conn_type == "ble" and not BLE_AVAILABLE:
+        return jsonify({"error": "BLE not available on this server"}), 400
+    # Check for duplicate name
+    for d in config.DEVICES:
+        if d["name"] == name:
+            return jsonify({"error": f"device '{name}' already exists"}), 400
+
+    dev_cfg = {"name": name, "type": conn_type, "host": host, "port": port, "ble_address": ble_address}
+    config.DEVICES.append(dev_cfg)
+    _save_devices_to_config()
+    success = connect_device(dev_cfg)
+    label = f"BLE {ble_address or 'scan'}" if conn_type == "ble" else f"{host}:{port}"
+    print(f"{'✓' if success else '✗'} Added device {name} ({label})")
+    return jsonify({"status": "added", "connected": success, "device": dev_cfg})
+
+
+@app.route("/api/devices/edit", methods=["POST"])
+def api_device_edit():
+    """Edit an existing device's settings."""
+    data = request.json
+    old_name = data.get("oldName", "").strip()
+    new_name = data.get("name", "").strip()
+    new_type = data.get("type", "tcp").strip()
+    new_host = data.get("host", "").strip()
+    new_port = int(data.get("port", 4403))
+    new_ble = data.get("ble_address", "").strip()
+
+    if not old_name:
+        return jsonify({"error": "oldName is required"}), 400
+    if not new_name:
+        return jsonify({"error": "name is required"}), 400
+    if new_type == "tcp" and not new_host:
+        return jsonify({"error": "host (IP) is required"}), 400
+
+    # Find the config entry
+    found = None
+    for d in config.DEVICES:
+        if d["name"] == old_name:
+            found = d
+            break
+    if not found:
+        return jsonify({"error": f"device '{old_name}' not found"}), 404
+
+    # Check for name conflicts if renaming
+    if new_name != old_name:
+        for d in config.DEVICES:
+            if d["name"] == new_name:
+                return jsonify({"error": f"device '{new_name}' already exists"}), 400
+
+    # Disconnect old
+    old_dev = devices.get(old_name)
+    if old_dev and old_dev.get("interface"):
+        try:
+            old_dev["interface"].close()
+        except Exception:
+            pass
+    if old_name in devices:
+        del devices[old_name]
+
+    # Update config
+    found["name"] = new_name
+    found["type"] = new_type
+    found["host"] = new_host
+    found["port"] = new_port
+    found["ble_address"] = new_ble
+    _save_devices_to_config()
+
+    # Reconnect with new settings
+    success = connect_device(found)
+    label = f"BLE {new_ble or 'scan'}" if new_type == "ble" else f"{new_host}:{new_port}"
+    print(f"{'✓' if success else '✗'} Edited device {old_name} → {new_name} ({label})")
+    return jsonify({"status": "updated", "connected": success, "device": found})
+
+
+@app.route("/api/devices/remove", methods=["POST"])
+def api_device_remove():
+    """Remove a device from config and disconnect it."""
+    data = request.json
+    name = data.get("name", "").strip()
+
+    if not name:
+        return jsonify({"error": "name is required"}), 400
+
+    # Find and remove from config
+    new_list = [d for d in config.DEVICES if d["name"] != name]
+    if len(new_list) == len(config.DEVICES):
+        return jsonify({"error": f"device '{name}' not found"}), 404
+    config.DEVICES[:] = new_list
+    _save_devices_to_config()
+
+    # Disconnect
+    dev = devices.get(name)
+    if dev and dev.get("interface"):
+        try:
+            dev["interface"].close()
+        except Exception:
+            pass
+    devices.pop(name, None)
+    print(f"✓ Removed device {name}")
+    return jsonify({"status": "removed", "device": name})
+
+
+@app.route("/api/ble/scan", methods=["POST"])
+def api_ble_scan():
+    """Scan for nearby BLE Meshtastic devices."""
+    if not BLE_AVAILABLE:
+        return jsonify({"error": "BLE not available on this server"}), 400
+    try:
+        from meshtastic.ble_interface import BLEClient, SERVICE_UUID
+        import asyncio
+        from bleak import BleakScanner
+
+        # Scan specifically for Meshtastic devices using the service UUID filter
+        async def _scan():
+            # First try filtered scan for Meshtastic devices only
+            meshtastic_devs = await BleakScanner.discover(
+                timeout=8.0,
+                service_uuids=[SERVICE_UUID],
+            )
+            return meshtastic_devs
+
+        loop = asyncio.new_event_loop()
+        try:
+            found = loop.run_until_complete(_scan())
+        finally:
+            loop.close()
+
+        results = []
+        for d in (found or []):
+            name = d.name or "Unknown"
+            results.append({
+                "name": name,
+                "address": str(d.address),
+                "meshtastic": True,
+                "rssi": d.rssi if hasattr(d, "rssi") else None,
+            })
+        # Sort by signal strength (strongest first)
+        results.sort(key=lambda x: -(x["rssi"] or -999))
+        return jsonify({"devices": results})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"BLE scan failed: {e}"}), 500
+
+
+@app.route("/api/ble/available")
+def api_ble_available():
+    """Check if BLE is available on the server."""
+    return jsonify({"available": BLE_AVAILABLE})
+
+
+@app.route("/api/ble/pair", methods=["POST"])
+def api_ble_pair():
+    """Pair with a BLE device using bluetoothctl. Accepts address and optional pin."""
+    data = request.json
+    address = data.get("address", "").strip()
+    pin = data.get("pin", "").strip()
+    if not address:
+        return jsonify({"error": "address is required"}), 400
+
+    try:
+        import pexpect
+        log_lines = []
+
+        child = pexpect.spawn("bluetoothctl", encoding="utf-8", timeout=30)
+        child.logfile_read = None  # we'll capture manually
+
+        def send(cmd):
+            child.sendline(cmd)
+            time.sleep(0.5)
+
+        send("power on")
+        time.sleep(1)
+        send("agent on")
+        time.sleep(0.5)
+        send("default-agent")
+        time.sleep(0.5)
+
+        # Scan to discover the device
+        send("scan on")
+        time.sleep(10)
+        send("scan off")
+        time.sleep(1)
+
+        # Pair
+        send(f"pair {address}")
+        time.sleep(2)
+
+        # Check if PIN is requested
+        try:
+            idx = child.expect(["Passkey", "PIN", "Enter passkey", "pairing successful",
+                                "Already Exists", "not available", pexpect.TIMEOUT], timeout=8)
+            before_text = child.before or ""
+            log_lines.append(before_text)
+            if idx in [0, 1, 2]:
+                # PIN requested — send it
+                if pin:
+                    child.sendline(pin)
+                    time.sleep(5)
+                    log_lines.append(f"Sent PIN: {pin}")
+                else:
+                    log_lines.append("PIN requested but none provided")
+            elif idx == 3:
+                log_lines.append("Pairing successful")
+            elif idx == 4:
+                log_lines.append("Already paired")
+            elif idx == 5:
+                log_lines.append("Device not available")
+            else:
+                log_lines.append("Timeout waiting for pairing response")
+        except Exception as e:
+            log_lines.append(f"Expect error: {e}")
+
+        # Trust the device
+        send(f"trust {address}")
+        time.sleep(2)
+
+        # Check final state
+        send(f"info {address}")
+        time.sleep(2)
+        try:
+            child.expect(pexpect.TIMEOUT, timeout=2)
+        except Exception:
+            pass
+        remaining = child.before or ""
+        log_lines.append(remaining)
+
+        paired = "Paired: yes" in remaining
+        trusted = "Trusted: yes" in remaining
+
+        send("quit")
+        child.close()
+
+        log_text = "\n".join(str(l) for l in log_lines)
+        print(f"BLE pair result for {address}: paired={paired}, trusted={trusted}")
+        return jsonify({
+            "paired": paired,
+            "trusted": trusted,
+            "log": log_text[-500:],  # last 500 chars
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"BLE pair failed: {e}"}), 500
 
 
 # ── MQTT API Routes ──────────────────────────────────────────────────────────

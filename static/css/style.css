@@ -456,6 +456,139 @@ tbody tr:hover { background: var(--bg-hover); }
 }
 .msg-out .msg-meta { color: rgba(255,255,255,.6); }
 
+/* ── Message Sub-tabs ───────────────────────────────────────────────────── */
+
+.msg-subtabs {
+    display: flex;
+    gap: .35rem;
+    margin-left: auto;
+}
+.msg-subtab {
+    background: var(--bg-primary);
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: .25rem .65rem;
+    font-size: .72rem;
+    cursor: pointer;
+    transition: background .15s, color .15s;
+    display: flex;
+    align-items: center;
+    gap: .35rem;
+}
+.msg-subtab:hover { background: var(--bg-hover); }
+.msg-subtab.active {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+}
+.msg-subtab .badge {
+    font-size: .65rem;
+    padding: .05rem .35rem;
+}
+
+.msg-dm {
+    border-left: 3px solid var(--purple);
+}
+.msg-dm-tag {
+    display: inline-block;
+    background: var(--purple);
+    color: #fff;
+    font-size: .6rem;
+    font-weight: 600;
+    padding: .05rem .35rem;
+    border-radius: 3px;
+    margin-right: .35rem;
+    vertical-align: middle;
+    text-transform: uppercase;
+    letter-spacing: .03em;
+}
+
+/* ── Modal ──────────────────────────────────────────────────────────────── */
+
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    backdrop-filter: blur(3px);
+}
+.modal {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    width: 100%;
+    max-width: 420px;
+    box-shadow: 0 12px 40px rgba(0,0,0,.4);
+}
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: .85rem 1.1rem;
+    border-bottom: 1px solid var(--border);
+}
+.modal-header h3 { margin: 0; font-size: .95rem; }
+.modal-close {
+    font-size: 1.2rem;
+    line-height: 1;
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+}
+.modal-close:hover { color: var(--red); }
+.modal-body {
+    padding: 1rem 1.1rem;
+    display: flex;
+    flex-direction: column;
+    gap: .75rem;
+}
+.modal-label {
+    display: flex;
+    flex-direction: column;
+    gap: .25rem;
+    font-size: .78rem;
+    color: var(--text-secondary);
+}
+.modal-label .input {
+    font-size: .82rem;
+}
+.modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: .5rem;
+    padding-top: .5rem;
+    border-top: 1px solid var(--border);
+}
+
+/* ── Device Mgmt Buttons ────────────────────────────────────────────────── */
+
+.btn-edit {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+}
+.btn-edit:hover { opacity: .85; }
+.btn-remove {
+    background: var(--red);
+    color: #fff;
+    border: none;
+}
+.btn-remove:hover { opacity: .85; }
+.btn-secondary {
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+}
+.btn-secondary:hover { background: var(--bg-hover); }
+
+/* BLE scan results */
+.ble-scan-item:hover { background: var(--bg-hover); }
+
 /* ── Send Form ──────────────────────────────────────────────────────────── */
 
 .send-form {

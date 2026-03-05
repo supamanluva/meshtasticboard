@@ -83,7 +83,10 @@
     <main id="tab-dashboard" class="tab-content active">
         <div class="dashboard dashboard-home">
             <section class="panel panel-devices">
-                <div class="panel-header"><h2>Devices</h2></div>
+                <div class="panel-header">
+                    <h2>Devices</h2>
+                    <button id="btn-add-device" class="btn btn-sm btn-primary" title="Add new device">+ Add Device</button>
+                </div>
                 <div id="devices-container" class="panel-body">
                     <p class="muted">Loading devices…</p>
                 </div>
@@ -289,7 +292,11 @@
             <section class="panel panel-full">
                 <div class="panel-header">
                     <h2>Messages</h2>
-                    <span id="msg-count-header" class="badge">0</span>
+                    <div class="msg-subtabs">
+                        <button class="msg-subtab active" data-filter="all">All <span id="msg-count-header" class="badge">0</span></button>
+                        <button class="msg-subtab" data-filter="broadcast">Broadcast <span id="msg-broadcast-count" class="badge">0</span></button>
+                        <button class="msg-subtab" data-filter="dm">Direct <span id="msg-dm-count" class="badge">0</span></button>
+                    </div>
                 </div>
                 <div class="panel-body">
                     <div id="messages-list" class="messages-list">
@@ -557,6 +564,54 @@
 
     <!-- Toast container for notifications -->
     <div id="toast-container"></div>
+
+    <!-- Device Add/Edit Modal -->
+    <div id="device-modal" class="modal-overlay" style="display:none">
+        <div class="modal">
+            <div class="modal-header">
+                <h3 id="device-modal-title">Add Device</h3>
+                <button class="btn btn-sm btn-icon modal-close" onclick="closeDeviceModal()">&times;</button>
+            </div>
+            <form id="device-modal-form" class="modal-body">
+                <input type="hidden" id="dm-old-name" value="">
+                <label class="modal-label">
+                    Name
+                    <input id="dm-name" type="text" class="input" placeholder="e.g. Device 1" required>
+                </label>
+                <label class="modal-label">
+                    Connection Type
+                    <select id="dm-type" class="input" onchange="window.toggleDeviceTypeFields()">
+                        <option value="tcp" selected>TCP / WiFi</option>
+                        <option value="ble">Bluetooth (BLE)</option>
+                    </select>
+                </label>
+                <div id="dm-tcp-fields">
+                    <label class="modal-label">
+                        Host / IP
+                        <input id="dm-host" type="text" class="input" placeholder="e.g. 192.168.1.100">
+                    </label>
+                    <label class="modal-label">
+                        Port
+                        <input id="dm-port" type="number" class="input" value="4403" min="1" max="65535">
+                    </label>
+                </div>
+                <div id="dm-ble-fields" style="display:none">
+                    <label class="modal-label">
+                        BLE Address <small style="opacity:.6">(leave empty to scan)</small>
+                        <div style="display:flex;gap:6px">
+                            <input id="dm-ble-address" type="text" class="input" placeholder="e.g. AA:BB:CC:DD:EE:FF" style="flex:1">
+                            <button type="button" class="btn btn-secondary btn-sm" id="dm-ble-scan-btn" onclick="window.scanBLE()">Scan</button>
+                        </div>
+                    </label>
+                    <div id="dm-ble-scan-results" style="display:none;margin-top:6px"></div>
+                </div>
+                <div class="modal-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeDeviceModal()">Cancel</button>
+                    <button type="submit" class="btn btn-primary" id="dm-submit">Add Device</button>
+                </div>
+            </form>
+        </div>
+    </div>
 
     <!-- Audio for message notifications -->
     <audio id="notif-sound" preload="auto">
