@@ -1,10 +1,10 @@
 # Meshtastic Dashboard
 
-A full-featured web dashboard for monitoring and managing Meshtastic devices on your LAN. Connect via TCP, view mesh nodes, send messages, visualize network topology, run traceroutes, monitor statistics, and tap into the MQTT mesh network — all from your browser.
+A full-featured web dashboard for monitoring and managing Meshtastic devices. Connect via **TCP** or **Bluetooth (BLE)**, view mesh nodes, send messages, visualize network topology, run traceroutes, monitor statistics, and tap into the MQTT mesh network — all from your browser.
 
 ![Python](https://img.shields.io/badge/python-3.9+-blue)
 ![Flask](https://img.shields.io/badge/flask-3.x-green)
-![Meshtastic](https://img.shields.io/badge/meshtastic-TCP-orange)
+![Meshtastic](https://img.shields.io/badge/meshtastic-TCP%20%7C%20BLE-orange)
 ![MQTT](https://img.shields.io/badge/MQTT-TLS-blueviolet)
 ![License](https://img.shields.io/badge/license-MIT-brightgreen)
 
@@ -15,16 +15,22 @@ A full-featured web dashboard for monitoring and managing Meshtastic devices on 
 ## Features
 
 ### Local Device Management
+- **TCP & Bluetooth (BLE) Connections** — Connect to devices over WiFi/LAN (TCP) or Bluetooth Low Energy
+- **BLE Device Scanner** — Scan for nearby Meshtastic BLE devices with signal strength, filter by Meshtastic service UUID
+- **BLE Pairing** — Pair with BLE devices directly from the dashboard (PIN code support)
+- **Add / Edit / Remove Devices** — Manage devices from the dashboard UI without editing config files
 - **Device Overview** — Connection status, firmware version, hardware model, online node count
 - **Mesh Nodes** — Full node table with battery, SNR, hops, position, last heard, searchable
 - **Real-time Messaging** — Send/receive text messages via any connected device, channel selection
-- **Interactive Map** — Leaflet map with all GPS-positioned nodes, click-to-fly sidebar
+- **Message Filtering** — Separate views for All, Broadcast, and Direct messages
+- **Interactive Map** — Leaflet map with all GPS-positioned nodes, auto-fit to bounds, click-to-fly sidebar
 - **Signal Topology Graph** — D3.js force-directed graph showing node connections colored by SNR
 - **Traceroute Tool** — Trace the path to any node, visualize hops on a map
 - **Node Statistics** — Charts for battery levels, SNR distribution, channel utilization, hardware models
 - **Device Remote Config** — View/edit device owner name, set fixed position, view LoRa & channel settings
 - **Device Reboot** — One-click reboot with automatic reconnection
 - **Disconnect / Reconnect** — Manage device connections without restarting the server
+- **Auto-Reconnect Watchdog** — Background health monitoring with automatic reconnection for both TCP and BLE
 
 ### MQTT Integration
 - **MQTT Live Feed** — Real-time stream of decoded packets from the mesh network via MQTT broker
@@ -46,8 +52,10 @@ A full-featured web dashboard for monitoring and managing Meshtastic devices on 
 ## Prerequisites
 
 - **Python 3.9+**
-- **Meshtastic device(s)** with WiFi enabled, connected to your LAN
-- Devices must have the TCP API accessible (default port `4403`)
+- **Meshtastic device(s)** connected via one of:
+  - **TCP/WiFi** — Device with WiFi enabled on your LAN (default port `4403`)
+  - **Bluetooth (BLE)** — Device with BLE enabled, server machine with Bluetooth hardware
+- For BLE: `bluetoothctl` available on the host system (standard on most Linux distros)
 
 ## Quick Start
 
@@ -77,12 +85,15 @@ pip install -r requirements.txt
 cp config.example.py config.py
 ```
 
-Edit `config.py` with your Meshtastic device IPs and MQTT broker:
+Edit `config.py` with your Meshtastic devices and MQTT broker:
 
 ```python
 DEVICES = [
+    # TCP devices (WiFi/LAN)
     {"name": "Device 1", "host": "192.168.1.100", "port": 4403},
     {"name": "Device 2", "host": "192.168.1.101", "port": 4403},
+    # BLE devices (Bluetooth)
+    {"name": "BLE Node", "type": "ble", "ble_address": "AA:BB:CC:DD:EE:FF"},
 ]
 
 # MQTT broker settings (optional — for mesh-wide monitoring)
@@ -206,7 +217,7 @@ meshtasticboard/
 |-----------|-----------|
 | Backend | Flask + Flask-SocketIO |
 | Async | gevent + gevent-websocket |
-| Meshtastic | meshtastic Python library (TCP) |
+| Meshtastic | meshtastic Python library (TCP + BLE) |
 | MQTT | paho-mqtt + protobuf decryption |
 | Encryption | cryptography (AES-128-CTR) |
 | Map | Leaflet.js + CartoDB/OSM tiles |
@@ -222,6 +233,9 @@ meshtasticboard/
 |--------|----------|-------------|
 | GET | `/api/devices` | All device info and nodes |
 | GET | `/api/devices/<name>` | Single device info |
+| POST | `/api/devices/add` | Add a new device (TCP or BLE) |
+| POST | `/api/devices/edit` | Edit device settings |
+| POST | `/api/devices/remove` | Remove a device |
 | GET | `/api/nodes` | All mesh nodes |
 | GET | `/api/messages` | Message history |
 | POST | `/api/send` | Send a text message |
@@ -230,6 +244,14 @@ meshtasticboard/
 | POST | `/api/reboot` | Reboot a device (auto-reconnects) |
 | GET | `/api/config/<device>` | Get device configuration |
 | POST | `/api/config/<device>/set` | Update device settings |
+
+### Bluetooth (BLE)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/ble/available` | Check if BLE is available on the server |
+| POST | `/api/ble/scan` | Scan for nearby Meshtastic BLE devices |
+| POST | `/api/ble/pair` | Pair with a BLE device (supports PIN) |
 
 ### Network Analysis
 
