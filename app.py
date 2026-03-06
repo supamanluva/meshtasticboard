@@ -342,48 +342,84 @@ def connect_device(dev_cfg):
     port = dev_cfg.get("port", 4403)
     ble_address = dev_cfg.get("ble_address", "")
 
-    try:
-        if conn_type == "ble":
-            if not BLE_AVAILABLE:
-                raise RuntimeError("BLE not available (meshtastic.ble_interface not installed)")
-            addr = ble_address or None
-            print(f"→ Connecting to {name} via BLE ({addr or 'scan'}) …")
-            iface = meshtastic.ble_interface.BLEInterface(
-                address=addr,
-                noProto=False,
-            )
-        else:
-            print(f"→ Connecting to {name} at {host}:{port} …")
-            iface = meshtastic.tcp_interface.TCPInterface(
-                hostname=host,
-                portNumber=port,
-                noProto=False,
-            )
+    # Pre-register device as connecting so the UI can show status
+    devices.setdefault(name, {
+        "interface": None,
+        "type": conn_type,
+        "host": host,
+        "port": port,
+        "ble_address": ble_address,
+        "connected": False,
+        "error": "connecting…",
+    })
 
-        devices[name] = {
-            "interface": iface,
-            "type": conn_type,
-            "host": host,
-            "port": port,
-            "ble_address": ble_address,
-            "connected": True,
-            "connected_at": time.time(),
-        }
-        print(f"✓ {name} connected  (my node: {iface.myInfo})")
-        _collect_initial_stats(name, iface)
-        return True
-    except Exception as e:
-        print(f"✗ Failed to connect to {name}: {e}")
-        devices[name] = {
-            "interface": None,
-            "type": conn_type,
-            "host": host,
-            "port": port,
-            "ble_address": ble_address,
-            "connected": False,
-            "error": str(e),
-        }
-        return False
+    def _do_connect():
+        try:
+            if conn_type == "ble":
+                if not BLE_AVAILABLE:
+                    raise RuntimeError("BLE not available (meshtastic.ble_interface not installed)")
+                addr = ble_address or None
+                print(f"→ Connecting to {name} via BLE ({addr or 'scan'}) …")
+                iface = meshtastic.ble_interface.BLEInterface(
+                    address=addr,
+                    noProto=False,
+                )
+            else:
+                print(f"→ Connecting to {name} at {host}:{port} …")
+                iface = meshtastic.tcp_interface.TCPInterface(
+                    hostname=host,
+                    portNumber=port,
+                    noProto=False,
+                )
+
+            devices[name] = {
+                "interface": iface,
+                "type": conn_type,
+                "host": host,
+                "port": port,
+                "ble_address": ble_address,
+                "connected": True,
+                "connected_at": time.time(),
+            }
+            print(f"✓ {name} connected  (my node: {iface.myInfo})")
+            _collect_initial_stats(name, iface)
+            return True
+        except Exception as e:
+            print(f"✗ Failed to connect to {name}: {e}")
+            devices[name] = {
+                "interface": None,
+                "type": conn_type,
+                "host": host,
+                "port": port,
+                "ble_address": ble_address,
+                "connected": False,
+                "error": str(e),
+            }
+            return False
+
+    if conn_type == "ble":
+        # BLE connections can hang — run in a thread with a timeout
+        result = [False]
+        def _ble_thread():
+            result[0] = _do_connect()
+        t = threading.Thread(target=_ble_thread, name=f"BLEConnect-{name}", daemon=True)
+        t.start()
+        t.join(timeout=60)  # 60 second timeout for BLE
+        if t.is_alive():
+            print(f"✗ BLE connection to {name} timed out (60s)")
+            devices[name] = {
+                "interface": None,
+                "type": conn_type,
+                "host": host,
+                "port": port,
+                "ble_address": ble_address,
+                "connected": False,
+                "error": "BLE connection timed out",
+            }
+            return False
+        return result[0]
+    else:
+        return _do_connect()
 
 
 # ── Device Health Watchdog ───────────────────────────────────────────────────
@@ -1145,8 +1181,8 @@ def api_position_history():
     """Return position trail history for all nodes."""
     result = {}
     for node_id, points in position_history.items():
-        if points:
-            result[node_id] = points
+        if points and node_id is not None:
+            result[str(node_id)] = points
     return jsonify(result)
 
 
