@@ -263,8 +263,9 @@ function renderDevices(devices) {
         const ePort = d.port || 4403;
         const eType = d.type || "tcp";
         const eBle = escapeHtml(d.ble_address || "");
+        const eSerial = escapeHtml(d.serial_port || "");
         const mgmtBtns = `
-            <button class="btn btn-sm btn-edit" onclick="openEditDevice('${eName}','${eHost}',${ePort},'${eType}','${eBle}')" title="Edit">&#x270E; Edit</button>
+            <button class="btn btn-sm btn-edit" onclick="openEditDevice('${eName}','${eHost}',${ePort},'${eType}','${eBle}','${eSerial}')" title="Edit">&#x270E; Edit</button>
             <button class="btn btn-sm btn-remove" onclick="removeDevice('${eName}')" title="Remove">&#x2716; Remove</button>`;
         if (!d.connected) {
             return `<div class="device-card">
@@ -291,7 +292,7 @@ function renderDevices(devices) {
                 <span>FW: <strong>${info.firmware_version || "?"}</strong></span>
                 <span>HW: <strong>${info.hw_model || "?"}</strong></span>
                 <span>Nodes: <strong>${info.num_online_nodes ?? "?"}</strong></span>
-                <span>${eType === "ble" ? `BLE: <strong>${eBle || "scan"}</strong>` : `Host: <strong>${d.host}:${d.port}</strong>`}</span>
+                <span>${eType === "ble" ? `BLE: <strong>${eBle || "scan"}</strong>` : eType === "serial" ? `Serial: <strong>${eSerial}</strong>` : `Host: <strong>${d.host}:${d.port}</strong>`}</span>
                 ${info.shortName ? `<span>Short: <strong>${info.shortName}</strong></span>` : ""}
                 ${info.reboot_count ? `<span>Reboots: <strong>${info.reboot_count}</strong></span>` : ""}
             </div>
@@ -337,8 +338,8 @@ async function reconnectDevice(name) {
             body: JSON.stringify({ device: name }),
         });
         const data = await res.json();
-        if (res.ok && data.status === "connected") {
-            showToast(`Reconnected to ${name}`, "success");
+        if (res.ok && (data.status === "connected" || data.status === "connecting")) {
+            showToast(data.status === "connecting" ? `Reconnecting to ${name} (BLE)… this may take a moment` : `Reconnected to ${name}`, data.status === "connecting" ? "info" : "success");
             loadAll();
         } else {
             showToast(`Reconnect failed: ${data.error || data.status}`, "error");
@@ -382,12 +383,13 @@ function openAddDevice() {
     document.getElementById("dm-host").value = "";
     document.getElementById("dm-port").value = "4403";
     document.getElementById("dm-ble-address").value = "";
+    document.getElementById("dm-serial-port").value = "";
     document.getElementById("dm-ble-scan-results").style.display = "none";
     toggleDeviceTypeFields();
     document.getElementById("device-modal").style.display = "flex";
 }
 
-function openEditDevice(name, host, port, type, bleAddress) {
+function openEditDevice(name, host, port, type, bleAddress, serialPort) {
     document.getElementById("device-modal-title").textContent = "Edit Device";
     document.getElementById("dm-submit").textContent = "Save Changes";
     document.getElementById("dm-old-name").value = name;
@@ -396,6 +398,7 @@ function openEditDevice(name, host, port, type, bleAddress) {
     document.getElementById("dm-host").value = host || "";
     document.getElementById("dm-port").value = port || 4403;
     document.getElementById("dm-ble-address").value = bleAddress || "";
+    document.getElementById("dm-serial-port").value = serialPort || "";
     document.getElementById("dm-ble-scan-results").style.display = "none";
     toggleDeviceTypeFields();
     document.getElementById("device-modal").style.display = "flex";
@@ -405,6 +408,7 @@ function toggleDeviceTypeFields() {
     const type = document.getElementById("dm-type").value;
     document.getElementById("dm-tcp-fields").style.display = type === "tcp" ? "" : "none";
     document.getElementById("dm-ble-fields").style.display = type === "ble" ? "" : "none";
+    document.getElementById("dm-serial-fields").style.display = type === "serial" ? "" : "none";
 }
 
 async function scanBLE() {
@@ -480,20 +484,26 @@ function initDeviceManagement() {
         const host = document.getElementById("dm-host").value.trim();
         const port = parseInt(document.getElementById("dm-port").value) || 4403;
         const ble_address = document.getElementById("dm-ble-address").value.trim();
+        const serial_port = document.getElementById("dm-serial-port").value.trim();
 
         if (!name) { showToast("Name is required", "error"); return; }
         if (type === "tcp" && !host) { showToast("Host / IP is required for TCP", "error"); return; }
+        if (type === "serial" && !serial_port) { showToast("Serial port is required", "error"); return; }
 
         try {
             let res;
             if (oldName) {
-                res = await postJSON("/api/devices/edit", { oldName, name, type, host, port, ble_address });
+                res = await postJSON("/api/devices/edit", { oldName, name, type, host, port, ble_address, serial_port });
             } else {
-                res = await postJSON("/api/devices/add", { name, type, host, port, ble_address });
+                res = await postJSON("/api/devices/add", { name, type, host, port, ble_address, serial_port });
             }
             if (res.error) throw new Error(res.error);
             closeDeviceModal();
-            showToast(oldName ? `Device updated: ${name}` : `Device added: ${name}`, "success");
+            if (res.connecting) {
+                showToast(oldName ? `Device updated: ${name} — BLE connecting in background…` : `Device added: ${name} — BLE connecting in background…`, "info");
+            } else {
+                showToast(oldName ? `Device updated: ${name}` : `Device added: ${name}`, "success");
+            }
             loadAll();
         } catch (err) {
             showToast(`Failed: ${err.message}`, "error");
@@ -1479,6 +1489,7 @@ function initConfig() {
     document.getElementById("btn-save-owner")?.addEventListener("click", saveOwner);
     document.getElementById("btn-save-position")?.addEventListener("click", savePosition);
     document.getElementById("btn-remove-position")?.addEventListener("click", removePosition);
+    document.getElementById("btn-save-wifi")?.addEventListener("click", saveWifi);
 }
 
 async function loadDeviceConfig() {
@@ -1508,6 +1519,13 @@ async function loadDeviceConfig() {
 
         // Channels — load with full detail from channel API
         loadChannelManager(device);
+
+        // WiFi / Network
+        if (config.network) {
+            document.getElementById("cfg-wifi-enabled").checked = config.network.wifi_enabled || false;
+            document.getElementById("cfg-wifi-ssid").value = config.network.wifi_ssid || "";
+            document.getElementById("cfg-wifi-psk").value = config.network.wifi_psk || "";
+        }
 
         // Position config
         if (config.position) {
@@ -1567,6 +1585,25 @@ async function removePosition() {
         });
         if (res.error) throw new Error(res.error);
         showToast("Fixed position removed", "success");
+    } catch (e) {
+        showToast("Failed: " + e.message, "error");
+    }
+}
+
+async function saveWifi() {
+    const device = document.getElementById("config-device-select").value;
+    if (!device) { showToast("Select a device first", "error"); return; }
+    const wifi_enabled = document.getElementById("cfg-wifi-enabled").checked;
+    const wifi_ssid = document.getElementById("cfg-wifi-ssid").value.trim();
+    const wifi_psk = document.getElementById("cfg-wifi-psk").value;
+    if (wifi_enabled && !wifi_ssid) { showToast("Enter a WiFi SSID", "error"); return; }
+
+    try {
+        const res = await postJSON(`/api/config/${encodeURIComponent(device)}/set`, {
+            wifi_enabled, wifi_ssid, wifi_psk,
+        });
+        if (res.error) throw new Error(res.error);
+        showToast("WiFi config saved! " + (res.results || []).join(", "), "success");
     } catch (e) {
         showToast("Failed: " + e.message, "error");
     }

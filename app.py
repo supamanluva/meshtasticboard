@@ -13,6 +13,7 @@ import time
 import uuid
 import struct
 import base64
+import subprocess
 import threading
 import traceback
 from datetime import datetime, timezone
@@ -23,9 +24,157 @@ from flask_socketio import SocketIO
 
 import meshtastic
 import meshtastic.tcp_interface
+import meshtastic.serial_interface
 try:
     import meshtastic.ble_interface
     BLE_AVAILABLE = True
+
+    import asyncio
+    from bleak import BleakScanner, BleakClient as _BleakClient
+
+    _MESHTASTIC_SERVICE_UUID = "6ba1b218-15a8-461f-9fa8-5dcae273eafd"
+    _LOGRADIO_UUID = "5a3d6e49-06e6-4423-9944-e9de8cdf9547"
+    _LEGACY_LOGRADIO_UUID = "6c6fd238-78fa-436b-aacf-15c5be1ef2e2"
+
+    class _ThreadSafeBLEClient:
+        """BLEClient replacement that uses asyncio.run() on a dedicated thread.
+
+        The stock meshtastic BLEClient uses run_forever() which breaks
+        dbus-fast (EOF on the Unix socket). asyncio.run() calls
+        set_event_loop() which dbus-fast needs.
+        """
+
+        def __init__(self, address, disconnect_cb=None):
+            self.address = address
+            self._disconnect_cb = disconnect_cb
+            self.bleak_client = None
+            self._loop = None
+            self._queue = None
+            self._ready = threading.Event()
+            self._thread = threading.Thread(
+                target=self._run, name="BLEClient", daemon=True,
+            )
+            self._thread.start()
+            self._ready.wait(timeout=120)
+
+        def _run(self):
+            asyncio.run(self._worker())
+
+        async def _worker(self):
+            # Scan
+            print("[BLE] Scanning …", flush=True)
+            response = await BleakScanner.discover(
+                timeout=10, return_adv=True,
+                service_uuids=[_MESHTASTIC_SERVICE_UUID],
+            )
+            device = None
+            for dev, _adv in response.values():
+                if self.address and self.address in (dev.name, dev.address):
+                    device = dev
+                    break
+            if device is None:
+                self._ready.set()
+                raise meshtastic.ble_interface.BLEInterface.BLEError(
+                    f"No Meshtastic BLE peripheral '{self.address}' found."
+                )
+            print(f"[BLE] Found {device.name} ({device.address})", flush=True)
+
+            # Connect
+            self.bleak_client = _BleakClient(
+                device,
+                disconnected_callback=lambda _: (
+                    self._disconnect_cb() if self._disconnect_cb else None
+                ),
+            )
+            await self.bleak_client.connect(timeout=30)
+            print(f"[BLE] Connected — {len(self.bleak_client.services.services)} services", flush=True)
+            await asyncio.sleep(1)
+
+            self._loop = asyncio.get_event_loop()
+            self._queue = asyncio.Queue()
+            self._ready.set()
+
+            # Process commands from the main / library threads
+            while True:
+                cmd, args, kwargs, fut = await self._queue.get()
+                if cmd == "_stop":
+                    fut.set_result(None)
+                    break
+                try:
+                    coro = getattr(self.bleak_client, cmd)(*args, **kwargs)
+                    result = await coro
+                    fut.set_result(result)
+                except Exception as exc:
+                    fut.set_exception(exc)
+
+            try:
+                await self.bleak_client.disconnect()
+            except Exception:
+                pass
+
+        def _call(self, method, *args, timeout=30, **kwargs):
+            """Schedule a BleakClient method on the worker loop and wait."""
+            if self._loop is None or self._loop.is_closed():
+                raise ConnectionError("BLE worker loop is not running")
+            fut = asyncio.Future(loop=self._loop)
+            asyncio.run_coroutine_threadsafe(
+                self._queue.put((method, args, kwargs, fut)), self._loop,
+            )
+            deadline = time.monotonic() + timeout
+            while not fut.done():
+                if time.monotonic() > deadline:
+                    raise TimeoutError(f"BLE {method} timed out after {timeout}s")
+                time.sleep(0.005)
+            return fut.result()
+
+        # --- meshtastic BLEClient-compatible API ---
+
+        def connect(self, **kwargs):
+            pass  # already connected in __init__
+
+        def disconnect(self, **kwargs):
+            try:
+                if self._loop and not self._loop.is_closed():
+                    fut = asyncio.Future(loop=self._loop)
+                    asyncio.run_coroutine_threadsafe(
+                        self._queue.put(("_stop", [], {}, fut)), self._loop,
+                    )
+                self._thread.join(timeout=5)
+            except Exception:
+                pass
+
+        def discover(self, **kwargs):
+            pass  # already discovered
+
+        def read_gatt_char(self, *args, **kwargs):
+            return self._call("read_gatt_char", *args, **kwargs)
+
+        def write_gatt_char(self, *args, **kwargs):
+            self._call("write_gatt_char", *args, **kwargs)
+
+        def has_characteristic(self, specifier):
+            if specifier in (_LOGRADIO_UUID, _LEGACY_LOGRADIO_UUID):
+                return False
+            return bool(self.bleak_client.services.get_characteristic(specifier))
+
+        def start_notify(self, *args, **kwargs):
+            self._call("start_notify", *args, **kwargs)
+
+        def close(self):
+            self.disconnect()
+
+    def _patched_ble_connect(self, address=None):
+        """Create a _ThreadSafeBLEClient (scan+connect in asyncio.run on a thread)."""
+        print("[BLE] Connecting …", flush=True)
+        client = _ThreadSafeBLEClient(address, disconnect_cb=self.close)
+        if client.bleak_client is None or not client.bleak_client.is_connected:
+            raise meshtastic.ble_interface.BLEInterface.BLEError(
+                f"Failed to connect to '{address}'."
+            )
+        print("[BLE] Connection established.", flush=True)
+        return client
+
+    meshtastic.ble_interface.BLEInterface.connect = _patched_ble_connect
 except ImportError:
     BLE_AVAILABLE = False
 from pubsub import pub
@@ -34,6 +183,9 @@ from google.protobuf.json_format import MessageToDict as _pb_to_dict
 import paho.mqtt.client as paho_mqtt
 from meshtastic.protobuf import mqtt_pb2, mesh_pb2, portnums_pb2
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
+from cryptography.hazmat.primitives.ciphers.aead import AESCCM
+import hashlib
 
 import config
 
@@ -103,6 +255,88 @@ def _get_decryption_keys():
     return keys
 
 
+# ── PKC (Public Key Crypto) Decryption ───────────────────────────────────────
+
+def _pkc_decrypt(encrypted_bytes, sender_public_key, recipient_private_key, from_node, packet_id):
+    """Decrypt a PKC-encrypted Meshtastic packet using X25519 + AES-256-CCM.
+
+    The encrypted payload layout is: ciphertext | auth_tag(8) | extraNonce(4).
+    Returns a mesh_pb2.Data protobuf on success, or None on failure.
+    """
+    if len(encrypted_bytes) <= 12:
+        return None
+    try:
+        # Split payload: ciphertext | auth_tag(8 bytes) | extraNonce(4 bytes)
+        ct_and_tag = encrypted_bytes[:-4]    # ciphertext + 8-byte auth tag
+        extra_nonce = struct.unpack('<I', encrypted_bytes[-4:])[0]
+
+        # X25519 ECDH shared secret
+        priv = X25519PrivateKey.from_private_bytes(recipient_private_key)
+        pub = X25519PublicKey.from_public_bytes(sender_public_key)
+        shared_secret = priv.exchange(pub)
+
+        # SHA-256 hash → AES-256 key (same as firmware CryptoEngine::hash)
+        key = hashlib.sha256(shared_secret).digest()
+
+        # Build 13-byte nonce (matches firmware initNonce)
+        nonce = bytearray(16)
+        struct.pack_into('<Q', nonce, 0, packet_id)    # bytes 0-7: packetId
+        struct.pack_into('<I', nonce, 8, from_node)    # bytes 8-11: fromNode
+        if extra_nonce:
+            struct.pack_into('<I', nonce, 4, extra_nonce)  # bytes 4-7: overwrite
+        nonce = bytes(nonce[:13])
+
+        # AES-256-CCM decrypt (tag_length=8 matches firmware aes_ccm_ad call)
+        aesccm = AESCCM(key, tag_length=8)
+        plaintext = aesccm.decrypt(nonce, ct_and_tag, None)
+
+        # Parse decrypted bytes as Data protobuf
+        data = mesh_pb2.Data()
+        data.ParseFromString(plaintext)
+        if data.portnum and data.portnum > 0:
+            return data
+        return None
+    except Exception as e:
+        print(f"⚠ PKC decrypt failed: {e}")
+        return None
+
+
+def _get_device_private_key(interface):
+    """Get the cached private key for the device connected via this interface."""
+    for name, dev in devices.items():
+        if dev.get("interface") is interface:
+            return dev.get("private_key")
+    return None
+
+
+def _lookup_node_public_key(interface, node_id):
+    """Look up a node's public key from the interface's node database.
+
+    node_id can be a string like '!db2b55ec' or an integer node number.
+    Returns 32 raw bytes or None.
+    """
+    try:
+        node = None
+        if isinstance(node_id, str) and interface.nodes:
+            node = interface.nodes.get(node_id)
+        if node is None and isinstance(node_id, int) and interface.nodesByNum:
+            node = interface.nodesByNum.get(node_id)
+        if node is None:
+            return None
+        pk = node.get("user", {}).get("publicKey")
+        if not pk:
+            return None
+        # MessageToDict stores bytes as base64 strings
+        if isinstance(pk, str):
+            raw = base64.b64decode(pk)
+        else:
+            raw = bytes(pk)
+        return raw if len(raw) == 32 else None
+    except Exception as e:
+        print(f"⚠ publicKey lookup failed for {node_id}: {e}")
+        return None
+
+
 # ── Meshtastic Connection Helpers ────────────────────────────────────────────
 
 def on_receive(packet, interface):
@@ -112,6 +346,41 @@ def on_receive(packet, interface):
         portnum = decoded.get("portnum", "")
         from_id = packet.get("fromId", "")
         to_id = packet.get("toId", "")
+
+        # DEBUG: Log every packet to diagnose PKC issue
+        raw = packet.get("raw")
+        has_encrypted = "encrypted" in packet or (raw and raw.encrypted)
+        has_decoded = bool(decoded)
+        pub_key = bytes(raw.public_key) if raw and raw.public_key else b""
+        pki_flag = getattr(raw, 'pki_encrypted', False) if raw else False
+        if has_encrypted or not has_decoded:
+            print(f"📦 PACKET: from={from_id} to={to_id} portnum={portnum} "
+                  f"has_decoded={has_decoded} has_encrypted={has_encrypted} "
+                  f"pub_key_len={len(pub_key)} pki_flag={pki_flag}")
+
+        # Attempt PKC decryption for encrypted packets we haven't decoded yet
+        if not decoded and has_encrypted and raw and raw.encrypted:
+            sender_pub = pub_key if len(pub_key) == 32 else None
+            if not sender_pub:
+                # Fallback: look up sender's public key from node database
+                from_num = packet.get("from", 0) or getattr(raw, 'from', 0)
+                sender_pub = _lookup_node_public_key(interface, from_id) or _lookup_node_public_key(interface, from_num)
+            priv_key = _get_device_private_key(interface)
+            print(f"🔐 PKC attempt: from={from_id} to={to_id} pub_key_src={'packet' if len(pub_key)==32 else 'nodeDB' if sender_pub else 'NONE'} has_priv={priv_key is not None} enc_len={len(bytes(raw.encrypted))}")
+            if sender_pub and priv_key and len(sender_pub) == 32:
+                from_node = packet.get("from", 0) or getattr(raw, 'from', 0)
+                data = _pkc_decrypt(
+                    bytes(raw.encrypted), sender_pub, priv_key,
+                    from_node, raw.id,
+                )
+                if data:
+                    decoded = _pb_to_dict(data)
+                    portnum = decoded.get("portnum", "")
+                    # Extract text from payload for text messages
+                    if portnum == "TEXT_MESSAGE_APP" and data.payload:
+                        decoded["text"] = data.payload.decode("utf-8", errors="replace")
+                    packet["decoded"] = decoded
+                    print(f"🔓 PKC decrypted: from={from_id} to={to_id} portnum={portnum}")
 
         # Track topology from every packet
         _update_topology(packet)
@@ -341,6 +610,7 @@ def connect_device(dev_cfg):
     host = dev_cfg.get("host", "")
     port = dev_cfg.get("port", 4403)
     ble_address = dev_cfg.get("ble_address", "")
+    serial_port = dev_cfg.get("serial_port", "")
 
     # Pre-register device as connecting so the UI can show status
     devices.setdefault(name, {
@@ -349,6 +619,7 @@ def connect_device(dev_cfg):
         "host": host,
         "port": port,
         "ble_address": ble_address,
+        "serial_port": serial_port,
         "connected": False,
         "error": "connecting…",
     })
@@ -359,9 +630,53 @@ def connect_device(dev_cfg):
                 if not BLE_AVAILABLE:
                     raise RuntimeError("BLE not available (meshtastic.ble_interface not installed)")
                 addr = ble_address or None
-                print(f"→ Connecting to {name} via BLE ({addr or 'scan'}) …")
-                iface = meshtastic.ble_interface.BLEInterface(
-                    address=addr,
+                if not addr:
+                    raise RuntimeError("BLE address is required (cannot scan without address)")
+                print(f"→ Connecting to {name} via BLE ({addr}) …")
+                # Disconnect any existing BlueZ connection before reconnecting
+                if addr:
+                    try:
+                        subprocess.run(
+                            ["bluetoothctl", "disconnect", addr],
+                            timeout=5, capture_output=True,
+                        )
+                        time.sleep(2)
+                    except Exception:
+                        pass
+                # BLE connections are flaky — retry up to 3 times
+                last_err = None
+                for attempt in range(1, 4):
+                    try:
+                        iface = meshtastic.ble_interface.BLEInterface(
+                            address=addr,
+                            noProto=False,
+                        )
+                        last_err = None
+                        break
+                    except Exception as e:
+                        last_err = e
+                        print(f"  ⚠ BLE attempt {attempt}/3 failed: {e}")
+                        # Clean BlueZ state and wait for device BLE to reset
+                        if addr:
+                            try:
+                                subprocess.run(
+                                    ["bluetoothctl", "disconnect", addr],
+                                    timeout=5, capture_output=True,
+                                )
+                                subprocess.run(
+                                    ["bluetoothctl", "remove", addr],
+                                    timeout=5, capture_output=True,
+                                )
+                            except Exception:
+                                pass
+                        time.sleep(5)
+                if last_err:
+                    raise last_err
+            elif conn_type == "serial":
+                sport = serial_port or "/dev/ttyACM0"
+                print(f"→ Connecting to {name} via serial ({sport}) …")
+                iface = meshtastic.serial_interface.SerialInterface(
+                    devPath=sport,
                     noProto=False,
                 )
             else:
@@ -372,6 +687,16 @@ def connect_device(dev_cfg):
                     noProto=False,
                 )
 
+            # Cache the device's X25519 private key for PKC decryption
+            private_key = None
+            try:
+                sec = iface.localNode.localConfig.security
+                if sec.private_key and len(bytes(sec.private_key)) == 32:
+                    private_key = bytes(sec.private_key)
+                    print(f"  🔑 {name}: cached PKC private key")
+            except Exception:
+                pass
+
             devices[name] = {
                 "interface": iface,
                 "type": conn_type,
@@ -380,6 +705,7 @@ def connect_device(dev_cfg):
                 "ble_address": ble_address,
                 "connected": True,
                 "connected_at": time.time(),
+                "private_key": private_key,
             }
             print(f"✓ {name} connected  (my node: {iface.myInfo})")
             _collect_initial_stats(name, iface)
@@ -397,29 +723,7 @@ def connect_device(dev_cfg):
             }
             return False
 
-    if conn_type == "ble":
-        # BLE connections can hang — run in a thread with a timeout
-        result = [False]
-        def _ble_thread():
-            result[0] = _do_connect()
-        t = threading.Thread(target=_ble_thread, name=f"BLEConnect-{name}", daemon=True)
-        t.start()
-        t.join(timeout=60)  # 60 second timeout for BLE
-        if t.is_alive():
-            print(f"✗ BLE connection to {name} timed out (60s)")
-            devices[name] = {
-                "interface": None,
-                "type": conn_type,
-                "host": host,
-                "port": port,
-                "ble_address": ble_address,
-                "connected": False,
-                "error": "BLE connection timed out",
-            }
-            return False
-        return result[0]
-    else:
-        return _do_connect()
+    return _do_connect()
 
 
 # ── Device Health Watchdog ───────────────────────────────────────────────────
@@ -451,6 +755,15 @@ def _check_device_health(name, dev):
             if bleak and hasattr(bleak, "is_connected"):
                 return bleak.is_connected
             # Fallback: if we can access nodes, it's alive
+            return iface.nodes is not None
+        elif conn_type == "serial":
+            # For serial: check if the stream/serial port is still open
+            stream = getattr(iface, "stream", None)
+            if stream is None:
+                return False
+            ser = getattr(stream, "stream", None) or getattr(stream, "serial", None)
+            if ser and hasattr(ser, "is_open"):
+                return ser.is_open
             return iface.nodes is not None
         else:
             # TCP: Check the underlying TCP stream
@@ -971,6 +1284,7 @@ def _serialize_node(node):
             else "never"
         ),
         "hopsAway": node.get("hopsAway", None),
+        "publicKey": user.get("publicKey", None),
     }
 
 
@@ -1048,6 +1362,7 @@ def _device_summary(name, dev):
         "port": dev.get("port"),
         "ble_address": dev.get("ble_address", ""),
         "connected": True,
+        "hasPkcKey": dev.get("private_key") is not None,
         "myInfo": my_info,
         "nodes": nodes,
         "channels": channels,
@@ -1339,6 +1654,18 @@ def api_reconnect():
                         old["interface"].close()
                     except Exception:
                         pass
+            conn_type = dev_cfg.get("type", "tcp")
+            if conn_type == "ble":
+                old_iface = old.get("interface") if old else None
+                def _ble_reconnect():
+                    if old_iface:
+                        try:
+                            old_iface.close()
+                        except Exception:
+                            pass
+                    connect_device(dev_cfg)
+                threading.Thread(target=_ble_reconnect, daemon=True).start()
+                return jsonify({"status": "connecting"})
             success = connect_device(dev_cfg)
             return jsonify({"status": "connected" if success else "failed"})
     return jsonify({"error": "device not found in config"}), 404
@@ -1399,6 +1726,8 @@ def _save_devices_to_config():
         conn_type = d.get("type", "tcp")
         if conn_type == "ble":
             lines.append(f'    {{"name": "{d["name"]}", "type": "ble", "ble_address": "{d.get("ble_address", "")}"}},')
+        elif conn_type == "serial":
+            lines.append(f'    {{"name": "{d["name"]}", "type": "serial", "serial_port": "{d.get("serial_port", "")}"}},')
         else:
             lines.append(f'    {{"name": "{d["name"]}", "host": "{d.get("host", "")}", "port": {d.get("port", 4403)}}},')
     lines.append("]")
@@ -1419,6 +1748,7 @@ def api_device_add():
     host = data.get("host", "").strip()
     port = int(data.get("port", 4403))
     ble_address = data.get("ble_address", "").strip()
+    serial_port = data.get("serial_port", "").strip()
 
     if not name:
         return jsonify({"error": "name is required"}), 400
@@ -1426,16 +1756,25 @@ def api_device_add():
         return jsonify({"error": "host (IP) is required for TCP devices"}), 400
     if conn_type == "ble" and not BLE_AVAILABLE:
         return jsonify({"error": "BLE not available on this server"}), 400
+    if conn_type == "serial" and not serial_port:
+        return jsonify({"error": "serial_port is required for serial devices"}), 400
     # Check for duplicate name
     for d in config.DEVICES:
         if d["name"] == name:
             return jsonify({"error": f"device '{name}' already exists"}), 400
 
-    dev_cfg = {"name": name, "type": conn_type, "host": host, "port": port, "ble_address": ble_address}
+    dev_cfg = {"name": name, "type": conn_type, "host": host, "port": port, "ble_address": ble_address, "serial_port": serial_port}
     config.DEVICES.append(dev_cfg)
     _save_devices_to_config()
+    if conn_type == "ble":
+        label = f"BLE {ble_address or 'scan'}"
+        threading.Thread(target=connect_device, args=(dev_cfg,), daemon=True).start()
+        return jsonify({"status": "added", "connected": False, "connecting": True, "device": dev_cfg})
     success = connect_device(dev_cfg)
-    label = f"BLE {ble_address or 'scan'}" if conn_type == "ble" else f"{host}:{port}"
+    if conn_type == "serial":
+        label = f"Serial {serial_port}"
+    else:
+        label = f"{host}:{port}"
     print(f"{'✓' if success else '✗'} Added device {name} ({label})")
     return jsonify({"status": "added", "connected": success, "device": dev_cfg})
 
@@ -1450,6 +1789,7 @@ def api_device_edit():
     new_host = data.get("host", "").strip()
     new_port = int(data.get("port", 4403))
     new_ble = data.get("ble_address", "").strip()
+    new_serial = data.get("serial_port", "").strip()
 
     if not old_name:
         return jsonify({"error": "oldName is required"}), 400
@@ -1457,6 +1797,10 @@ def api_device_edit():
         return jsonify({"error": "name is required"}), 400
     if new_type == "tcp" and not new_host:
         return jsonify({"error": "host (IP) is required"}), 400
+    if new_type == "ble" and not new_ble:
+        return jsonify({"error": "BLE address is required"}), 400
+    if new_type == "serial" and not new_serial:
+        return jsonify({"error": "serial_port is required"}), 400
 
     # Find the config entry
     found = None
@@ -1475,9 +1819,10 @@ def api_device_edit():
 
     # Disconnect old
     old_dev = devices.get(old_name)
-    if old_dev and old_dev.get("interface"):
+    old_iface = old_dev.get("interface") if old_dev else None
+    if old_dev and old_dev.get("type") != "ble" and old_iface:
         try:
-            old_dev["interface"].close()
+            old_iface.close()
         except Exception:
             pass
     if old_name in devices:
@@ -1489,11 +1834,27 @@ def api_device_edit():
     found["host"] = new_host
     found["port"] = new_port
     found["ble_address"] = new_ble
+    found["serial_port"] = new_serial
     _save_devices_to_config()
 
     # Reconnect with new settings
+    if new_type == "ble":
+        def _ble_edit_reconnect():
+            # Close BLE interface in background (can block/hang)
+            if old_iface:
+                try:
+                    old_iface.close()
+                except Exception:
+                    pass
+            connect_device(found)
+        threading.Thread(target=_ble_edit_reconnect, daemon=True).start()
+        print(f"↻ Edited device {old_name} → {new_name} (BLE {new_ble or 'scan'}), connecting in background…")
+        return jsonify({"status": "updated", "connected": False, "connecting": True, "device": found})
     success = connect_device(found)
-    label = f"BLE {new_ble or 'scan'}" if new_type == "ble" else f"{new_host}:{new_port}"
+    if new_type == "serial":
+        label = f"Serial {new_serial}"
+    else:
+        label = f"{new_host}:{new_port}"
     print(f"{'✓' if success else '✗'} Edited device {old_name} → {new_name} ({label})")
     return jsonify({"status": "updated", "connected": success, "device": found})
 
@@ -1588,8 +1949,28 @@ def api_ble_pair():
         import pexpect
         log_lines = []
 
-        child = pexpect.spawn("bluetoothctl", encoding="utf-8", timeout=30)
-        child.logfile_read = None  # we'll capture manually
+        # Close any existing meshtastic BLE connection first so bluetoothctl can pair
+        for dev_name, dev in devices.items():
+            if dev.get("ble_address") == address and dev.get("interface"):
+                try:
+                    dev["interface"].close()
+                except Exception:
+                    pass
+                dev["interface"] = None
+                dev["connected"] = False
+                print(f"  Closed {dev_name} BLE connection for pairing")
+
+        # Disconnect any existing BlueZ connection
+        subprocess.run(["bluetoothctl", "disconnect", address],
+                       timeout=5, capture_output=True)
+        time.sleep(1)
+        # Remove stale pairing data
+        subprocess.run(["bluetoothctl", "remove", address],
+                       timeout=5, capture_output=True)
+        time.sleep(1)
+
+        child = pexpect.spawn("bluetoothctl", encoding="utf-8", timeout=60)
+        child.logfile_read = None
 
         def send(cmd):
             child.sendline(cmd)
@@ -1610,28 +1991,62 @@ def api_ble_pair():
 
         # Pair
         send(f"pair {address}")
-        time.sleep(2)
 
-        # Check if PIN is requested
+        # Wait for PIN prompt or result — BlueZ uses various prompt formats:
+        #   "Enter passkey (number in 0-999999):"
+        #   "Request passkey"
+        #   "[agent] Enter passkey (number in 0-999999):"
+        #   "Confirm passkey NNNNNN (yes/no):"
         try:
-            idx = child.expect(["Passkey", "PIN", "Enter passkey", "pairing successful",
-                                "Already Exists", "not available", pexpect.TIMEOUT], timeout=8)
+            idx = child.expect([
+                r"[Ee]nter passkey",       # 0 - numeric passkey prompt
+                r"[Rr]equest passkey",     # 1 - passkey request
+                r"[Cc]onfirm passkey",     # 2 - confirm displayed passkey
+                r"[Pp]airing successful",  # 3 - already done
+                r"[Aa]lready [Ee]xists",   # 4 - already paired
+                r"not available",          # 5 - device not found
+                r"[Aa]uthentication",      # 6 - auth failed/cancelled
+                r"PIN",                    # 7 - PIN prompt
+                pexpect.TIMEOUT,           # 8 - timeout
+            ], timeout=15)
             before_text = child.before or ""
-            log_lines.append(before_text)
-            if idx in [0, 1, 2]:
-                # PIN requested — send it
+            log_lines.append(before_text.strip())
+            if idx in [0, 1, 7]:
+                # Passkey/PIN requested — send it
                 if pin:
                     child.sendline(pin)
                     time.sleep(5)
-                    log_lines.append(f"Sent PIN: {pin}")
+                    log_lines.append(f"Sent passkey: {pin}")
+                    # Wait for pairing result
+                    try:
+                        idx2 = child.expect([
+                            r"[Pp]airing successful",
+                            r"[Ff]ailed",
+                            r"[Aa]uthentication",
+                            pexpect.TIMEOUT,
+                        ], timeout=15)
+                        log_lines.append((child.before or "").strip())
+                        if idx2 == 0:
+                            log_lines.append("Pairing successful after PIN")
+                        else:
+                            log_lines.append(f"Pairing may have failed (idx={idx2})")
+                    except Exception:
+                        pass
                 else:
-                    log_lines.append("PIN requested but none provided")
+                    log_lines.append("Passkey requested but none provided")
+            elif idx == 2:
+                # Confirm passkey — answer yes
+                child.sendline("yes")
+                time.sleep(5)
+                log_lines.append("Confirmed passkey")
             elif idx == 3:
                 log_lines.append("Pairing successful")
             elif idx == 4:
                 log_lines.append("Already paired")
             elif idx == 5:
-                log_lines.append("Device not available")
+                log_lines.append("Device not available — try scanning first")
+            elif idx == 6:
+                log_lines.append("Authentication failed — wrong PIN or device rejected")
             else:
                 log_lines.append("Timeout waiting for pairing response")
         except Exception as e:
@@ -1645,11 +2060,11 @@ def api_ble_pair():
         send(f"info {address}")
         time.sleep(2)
         try:
-            child.expect(pexpect.TIMEOUT, timeout=2)
+            child.expect(pexpect.TIMEOUT, timeout=3)
         except Exception:
             pass
         remaining = child.before or ""
-        log_lines.append(remaining)
+        log_lines.append(remaining.strip())
 
         paired = "Paired: yes" in remaining
         trusted = "Trusted: yes" in remaining
@@ -1657,12 +2072,23 @@ def api_ble_pair():
         send("quit")
         child.close()
 
-        log_text = "\n".join(str(l) for l in log_lines)
+        log_text = "\n".join(str(l) for l in log_lines if l)
         print(f"BLE pair result for {address}: paired={paired}, trusted={trusted}")
+
+        # Auto-reconnect the device after successful pairing
+        if paired:
+            for dev_cfg in config.DEVICES:
+                if dev_cfg.get("ble_address") == address:
+                    threading.Thread(
+                        target=connect_device, args=(dev_cfg,), daemon=True,
+                    ).start()
+                    log_lines.append(f"Reconnecting {dev_cfg['name']} in background…")
+                    break
+
         return jsonify({
             "paired": paired,
             "trusted": trusted,
-            "log": log_text[-500:],  # last 500 chars
+            "log": log_text[-800:],
         })
     except Exception as e:
         import traceback
@@ -2047,6 +2473,13 @@ def api_get_config(device_name):
                     "gps_mode": pc.gps_mode if hasattr(pc, "gps_mode") else 0,
                     "position_broadcast_secs": pc.position_broadcast_secs if hasattr(pc, "position_broadcast_secs") else 0,
                 }
+            if hasattr(lc, "network"):
+                net = lc.network
+                result["network"] = {
+                    "wifi_enabled": net.wifi_enabled if hasattr(net, "wifi_enabled") else False,
+                    "wifi_ssid": net.wifi_ssid if hasattr(net, "wifi_ssid") else "",
+                    "wifi_psk": net.wifi_psk if hasattr(net, "wifi_psk") else "",
+                }
             if hasattr(lc, "lora"):
                 lr = lc.lora
                 result["lora"] = {
@@ -2055,6 +2488,13 @@ def api_get_config(device_name):
                     "hop_limit": lr.hop_limit if hasattr(lr, "hop_limit") else 3,
                     "tx_power": lr.tx_power if hasattr(lr, "tx_power") else 0,
                     "tx_enabled": lr.tx_enabled if hasattr(lr, "tx_enabled") else True,
+                }
+            if hasattr(lc, "bluetooth"):
+                bt = lc.bluetooth
+                result["bluetooth"] = {
+                    "enabled": bt.enabled if hasattr(bt, "enabled") else False,
+                    "mode": str(bt.mode) if hasattr(bt, "mode") else "",
+                    "fixed_pin": bt.fixed_pin if hasattr(bt, "fixed_pin") else 0,
                 }
 
         # Channels
@@ -2107,6 +2547,36 @@ def api_set_config(device_name):
         if "removePosition" in data and data["removePosition"]:
             iface.localNode.removeFixedPosition()
             results.append("Fixed position removed")
+
+        # Set WiFi config (disables BLE if enabling WiFi)
+        if "wifi_ssid" in data or "wifi_psk" in data or "wifi_enabled" in data:
+            ln = iface.localNode
+            if "wifi_ssid" in data:
+                ln.localConfig.network.wifi_ssid = data["wifi_ssid"]
+            if "wifi_psk" in data:
+                ln.localConfig.network.wifi_psk = data["wifi_psk"]
+            if "wifi_enabled" in data:
+                ln.localConfig.network.wifi_enabled = bool(data["wifi_enabled"])
+                if bool(data["wifi_enabled"]):
+                    ln.localConfig.bluetooth.enabled = False
+                    ln.writeConfig("bluetooth")
+                    results.append("BLE disabled (mutually exclusive with WiFi)")
+            ln.writeConfig("network")
+            results.append("WiFi config updated (device will reboot)")
+
+        # Set Bluetooth config (disables WiFi if enabling BLE)
+        if "bluetooth_enabled" in data or "bluetooth_pin" in data:
+            ln = iface.localNode
+            if "bluetooth_enabled" in data:
+                ln.localConfig.bluetooth.enabled = bool(data["bluetooth_enabled"])
+                if bool(data["bluetooth_enabled"]):
+                    ln.localConfig.network.wifi_enabled = False
+                    ln.writeConfig("network")
+                    results.append("WiFi disabled (mutually exclusive with BLE)")
+            if "bluetooth_pin" in data:
+                ln.localConfig.bluetooth.fixed_pin = int(data["bluetooth_pin"])
+            ln.writeConfig("bluetooth")
+            results.append("Bluetooth config updated")
 
         return jsonify({"status": "ok", "results": results})
     except Exception as e:

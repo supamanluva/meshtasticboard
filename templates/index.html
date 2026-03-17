@@ -370,6 +370,24 @@
                             <button id="btn-remove-position" class="btn btn-danger btn-sm">Remove Fixed Position</button>
                         </div>
                         <div class="config-section">
+                            <h3>WiFi / Network</h3>
+                            <div class="config-row">
+                                <label class="toggle-label">
+                                    <input id="cfg-wifi-enabled" type="checkbox"> WiFi Enabled
+                                </label>
+                            </div>
+                            <div class="config-row">
+                                <label>SSID</label>
+                                <input id="cfg-wifi-ssid" type="text" class="input" placeholder="WiFi network name">
+                            </div>
+                            <div class="config-row">
+                                <label>Password</label>
+                                <input id="cfg-wifi-psk" type="password" class="input" placeholder="WiFi password">
+                            </div>
+                            <button id="btn-save-wifi" class="btn btn-primary btn-sm">Save WiFi</button>
+                            <span class="muted" style="margin-left:8px;font-size:.85em">Device will reboot after saving.</span>
+                        </div>
+                        <div class="config-section">
                             <h3>LoRa Settings</h3>
                             <div id="lora-info" class="config-info"></div>
                         </div>
@@ -583,6 +601,7 @@
                     <select id="dm-type" class="input" onchange="window.toggleDeviceTypeFields()">
                         <option value="tcp" selected>TCP / WiFi</option>
                         <option value="ble">Bluetooth (BLE)</option>
+                        <option value="serial">Serial / USB</option>
                     </select>
                 </label>
                 <div id="dm-tcp-fields">
@@ -604,6 +623,12 @@
                         </div>
                     </label>
                     <div id="dm-ble-scan-results" style="display:none;margin-top:6px"></div>
+                </div>
+                <div id="dm-serial-fields" style="display:none">
+                    <label class="modal-label">
+                        Serial Port
+                        <input id="dm-serial-port" type="text" class="input" placeholder="e.g. /dev/ttyACM0 or COM3">
+                    </label>
                 </div>
                 <div class="modal-actions">
                     <button type="button" class="btn btn-secondary" onclick="closeDeviceModal()">Cancel</button>
